@@ -1,4 +1,4 @@
-# 快点下课（JhunHelper）
+# 快点下课（ClassOver）
 
 当前版本：**0.1.0**
 
@@ -64,7 +64,7 @@
 
 ## 打开与运行
 
-1. 用 DevEco Studio 打开本目录 `JhunHelper`。
+1. 用 DevEco Studio 打开本目录 `ClassOver`。
 2. 等待工程同步（Sync）。
 3. 配置签名：
    - `File → Project Structure → Signing Configs`

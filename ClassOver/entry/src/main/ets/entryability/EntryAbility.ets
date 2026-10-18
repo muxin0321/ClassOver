@@ -8,16 +8,16 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     AppStorage.setOrCreate('systemColorMode', this.context.config.colorMode);
-    hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Ability onCreate');
+    hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Ability onCreate');
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {
     AppStorage.setOrCreate('systemColorMode', newConfig.colorMode);
-    hilog.info(DOMAIN, 'JhunHelper', 'color mode: %{public}d', newConfig.colorMode);
+    hilog.info(DOMAIN, 'ClassOver', 'color mode: %{public}d', newConfig.colorMode);
   }
 
   onDestroy(): void {
-    hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Ability onDestroy');
+    hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Ability onDestroy');
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -42,27 +42,27 @@ export default class EntryAbility extends UIAbility {
         updateInsets(mainWindow);
       });
     } catch (err) {
-      hilog.warn(DOMAIN, 'JhunHelper', 'full screen setup failed: %{public}s', (err as Error).message);
+      hilog.warn(DOMAIN, 'ClassOver', 'full screen setup failed: %{public}s', (err as Error).message);
     }
 
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
-        hilog.error(DOMAIN, 'JhunHelper', 'Failed to load content: %{public}s', JSON.stringify(err));
+        hilog.error(DOMAIN, 'ClassOver', 'Failed to load content: %{public}s', JSON.stringify(err));
         return;
       }
-      hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Content loaded');
+      hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Content loaded');
     });
   }
 
   onWindowStageDestroy(): void {
-    hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Ability onWindowStageDestroy');
+    hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Ability onWindowStageDestroy');
   }
 
   onForeground(): void {
-    hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Ability onForeground');
+    hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
-    hilog.info(DOMAIN, 'JhunHelper', '%{public}s', 'Ability onBackground');
+    hilog.info(DOMAIN, 'ClassOver', '%{public}s', 'Ability onBackground');
   }
 }
