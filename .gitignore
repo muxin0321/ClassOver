@@ -10,3 +10,9 @@
 # 系统 / 编辑器
 .DS_Store
 Thumbs.db
+
+# 逆向分析素材（本地保留，不上传 GitHub）
+/APK/
+/analysis/
+/tools/
+/classover.jpg
