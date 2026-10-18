@@ -1,0 +1,1886 @@
+import { common, ConfigurationConstant } from '@kit.AbilityKit';
+import { router, window } from '@kit.ArkUI';
+import { webview } from '@kit.ArkWeb';
+import { url } from '@kit.ArkTS';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { Course } from '../model/Course';
+import { DEFAULT_ENDS, DEFAULT_STARTS, Schedule } from '../model/Schedule';
+import { AppPrefs } from '../store/AppPrefs';
+import { AcademicStore } from '../store/AcademicStore';
+import { CredentialStore } from '../store/CredentialStore';
+import { Scripts } from '../web/Scripts';
+import { JwxtWeb, LoginCheck, JWXT_HOME, JWXT_LOGIN } from '../web/JwxtWeb';
+import { THEME_OPTIONS, ThemeOption, ThemePalette, themeFor, tint } from '../theme/Theme';
+
+const DOMAIN: number = 0x0002;
+const CELL_H: number = 42;
+const BREAK_H: number = 16;
+const TIME_W: number = 40;
+const DAY_LABELS: string[] = ['一', '二', '三', '四', '五', '六', '日'];
+
+const ELECTRICITY_URL: string = 'https://authserver.jhun.edu.cn/authserver/login?service=https%3A%2F%2Fhub.17wanxiao.com%2Fbsacs%2Flight.action%3Fflag%3Dcassso30_jhdxjrxyjf%26ecardFunc%3Dindex';
+const REPAIR_URL: string = 'https://authserver.jhun.edu.cn/authserver/login?service=http%3A%2F%2Fhqfw.jhun.edu.cn%2Fwsbx%2Flogin%2Fcas%23%2Fwybx';
+const LAB_URL: string = 'http://wlxpk.jhun.edu.cn:6603/Page/Android/html/index.htm?t_s=1789478335510&amp_sec_version_=1&gid_=Uy9IS1Q1ZEd1WFMxTTBVT213M3duVmlEVERrQU56QzBLSTJFOGpna1N0aUEza08wOVVLQzFtQ2dERm5RN3JuZkwrUkNITDJkTmZrenowR2NQa3poaXc9PQ&EMAP_LANG=zh&THEME=indigo#/';
+const MAP_URL: string = 'https://gis.jhun.edu.cn/m/';
+
+const ALLOWED_HOSTS: string[] = [
+  'jwxt.jhun.edu.cn',
+  'authserver.jhun.edu.cn',
+  'ehall.jhun.edu.cn',
+  'hqfw.jhun.edu.cn',
+  'wlxpk.jhun.edu.cn',
+  'gis.jhun.edu.cn',
+  'hub.17wanxiao.com',
+  'open.17wanxiao.com',
+  'wapnew.17wanxiao.com',
+  'h5cloud.17wanxiao.com',
+  'mclient.alipay.com',
+  'alipay.com',
+  '17wanxiao.com'
+];
+
+function hostAllowed(raw: string): boolean {
+  try {
+    if (raw.startsWith('about:') || raw.startsWith('data:') || raw.startsWith('blob:')) {
+      return true;
+    }
+    const host = url.URL.parseURL(raw).hostname.toLowerCase();
+    if (!host) {
+      return false;
+    }
+    // 与原 App 一致：学校主域及其任意子域（jwxt / cas / sso / authserver ...）全部放行。
+    if (host === 'jhun.edu.cn' || host.endsWith('.jhun.edu.cn')) {
+      return true;
+    }
+    for (let i = 0; i < ALLOWED_HOSTS.length; i++) {
+      const allowed = ALLOWED_HOSTS[i];
+      if (host === allowed || host.endsWith('.' + allowed)) {
+        return true;
+      }
+    }
+  } catch (err) {
+    return false;
+  }
+  return false;
+}
+
+class CourseLayout {
+  course: Course;
+  x: number = 0;
+  y: number = 0;
+  w: number = 0;
+  h: number = 0;
+  bg: string = '';
+  fg: string = '';
+
+  constructor(course: Course) {
+    this.course = course;
+  }
+}
+
+class QuickLink {
+  title: string;
+  subtitle: string;
+  symbol: Resource;
+  url: string;
+  kind: string;
+  enabled: boolean;
+
+  constructor(title: string, subtitle: string, symbol: Resource,
+    target: string, kind: string, enabled: boolean) {
+    this.title = title;
+    this.subtitle = subtitle;
+    this.symbol = symbol;
+    this.url = target;
+    this.kind = kind;
+    this.enabled = enabled;
+  }
+}
+
+function colorIndex(name: string, count: number): number {
+  let sum = 0;
+  for (let i = 0; i < name.length; i++) {
+    sum = (sum + name.charCodeAt(i)) % 997;
+  }
+  return sum % count;
+}
+
+function formatStamp(timestamp: number): string {
+  if (!timestamp) {
+    return '';
+  }
+  const date = new Date(timestamp);
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  const hour = `${date.getHours()}`.padStart(2, '0');
+  const minute = `${date.getMinutes()}`.padStart(2, '0');
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+@Entry
+@Component
+struct Index {
+  @State currentTab: number = 0;
+  @State schedule: Schedule | null = null;
+  @State selectedTerm: string = '';
+  @State currentWeek: number = 1;
+  @State dayWidth: number = 0;
+  @State layouts: CourseLayout[] = [];
+  @State status: string = '尚未同步课表';
+  @State syncing: boolean = false;
+  @State webReady: boolean = false;
+  @State webCapable: boolean = true;
+  @State scriptLoaded: boolean = false;
+  @State debugNote: string = '';
+  @State loggedIn: boolean = false;
+  @State hasCredential: boolean = false;
+  @State savedAccount: string = '';
+  @State autoLogin: boolean = true;
+  @State todayDay: number = 1;
+
+  @StorageProp('systemColorMode') @Watch('onSystemColorModeChange')
+  systemColorMode: number = ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('topInset') topInset: number = 0;
+  @StorageProp('bottomInset') bottomInset: number = 0;
+  @State theme: ThemePalette = themeFor('D', false);
+  @State themeId: string = 'D';
+  @State colorMode: string = 'auto'; // auto | light | dark
+
+  @State showSheet: boolean = false;
+  @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准
+  @State selectedCourse: Course | null = null;
+
+  @State loginAccount: string = '';
+  @State loginPassword: string = '';
+  @State loginCaptcha: string = '';
+  @State loginCaptchaRequired: boolean = false;
+  @State captchaImage: string = '';
+  @State saveCredential: boolean = true;
+  @State loginBusy: boolean = false;
+  @State loginMessage: string = '';
+  @State pendingSync: boolean = false;
+
+  @State calibrationWeek: number = 1;
+  @State aboutExpanded: boolean = false;
+
+  private controller: webview.WebviewController = new webview.WebviewController();
+  private jwxt: JwxtWeb | null = null;
+  private store: AcademicStore | null = null;
+  private prefsReady: boolean = false;
+  private autoSyncStarted: boolean = false;
+  private loginWebOpened: boolean = false;
+
+  private links: QuickLink[] = [
+    new QuickLink('电费查询', '电量查询 · 在线缴费', $r('sys.symbol.bolt_1'), ELECTRICITY_URL, 'electricity', true),
+    new QuickLink('大物实验报告', '需连接校园网', $r('sys.symbol.science_technology'), LAB_URL, 'lab', true),
+    new QuickLink('校园地图', '探索校园', $r('sys.symbol.map'), MAP_URL, 'map', true),
+    new QuickLink('网上报修', '校园后勤服务', $r('sys.symbol.wrench_and_screwdriver'), REPAIR_URL, 'repair', true),
+    new QuickLink('成绩查询', '按学期查看', $r('sys.symbol.doc_text'), '', 'grades', false),
+    new QuickLink('考试安排', '考试倒计时', $r('sys.symbol.calendar'), '', 'exams', false)
+  ];
+
+  aboutToAppear(): void {
+    this.init();
+  }
+
+  onPageShow(): void {
+    const today = new Date().getDay();
+    this.todayDay = today === 0 ? 7 : today;
+    this.applySystemBars();
+    if (this.loginWebOpened) {
+      this.loginWebOpened = false;
+      this.syncNow(false);
+    }
+  }
+
+  private async init(): Promise<void> {
+    try {
+      this.webCapable = canIUse('SystemCapability.Web.Webview.Core');
+    } catch (err) {
+      this.webCapable = true;
+    }
+
+    const host = this.getUIContext().getHostContext();
+    if (!host) {
+      this.debugNote = '无法获取应用上下文';
+      this.prefsReady = true;
+      return;
+    }
+    const context = host as common.UIAbilityContext;
+
+    try {
+      await AppPrefs.init(context);
+    } catch (err) {
+      this.debugNote = '设置存储初始化失败';
+      hilog.error(DOMAIN, 'Index', 'prefs init failed: %{public}s', (err as Error).message);
+    }
+
+    const store = new AcademicStore(context);
+    this.store = store;
+    this.scriptLoaded = Scripts.load(context);
+    if (!this.scriptLoaded) {
+      this.debugNote = '注入脚本读取失败';
+    }
+    this.jwxt = new JwxtWeb(this.controller);
+
+    try {
+      this.autoLogin = AppPrefs.getBool('autoLogin', true);
+      this.savedAccount = AppPrefs.getString('savedAccount', '');
+      this.selectedTerm = AppPrefs.getString('selectedTerm', '');
+      this.currentWeek = AppPrefs.getNumber('currentWeek', 1);
+      this.themeId = AppPrefs.getString('themeId', 'D');
+      this.colorMode = AppPrefs.getString('colorMode', 'auto');
+    } catch (err) {
+      this.debugNote = '读取设置失败';
+    }
+    this.refreshTheme();
+    this.applyColorMode();
+
+    const today = new Date().getDay();
+    this.todayDay = today === 0 ? 7 : today;
+
+    try {
+      const credentials = await CredentialStore.load();
+      if (credentials) {
+        this.hasCredential = true;
+        if (!this.savedAccount) {
+          this.savedAccount = credentials.account;
+        }
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, 'Index', 'credential load failed: %{public}s', (err as Error).message);
+    }
+
+    try {
+      const cached = this.selectedTerm ? store.load(this.selectedTerm) : store.loadAny();
+      if (cached) {
+        this.schedule = cached;
+        this.selectedTerm = cached.term;
+        this.currentWeek = Math.min(Math.max(1, this.currentWeek), Math.max(1, cached.maxWeek));
+        this.calibrationWeek = this.currentWeek;
+        this.status = cached.savedAt ? `本地课表 · 上次更新 ${formatStamp(cached.savedAt)}` : '本地课表';
+        this.loggedIn = this.hasCredential;
+        this.rebuildLayout();
+      } else if (!this.hasCredential) {
+        this.status = '请先登录教务系统，获取你自己的课表';
+      }
+    } catch (err) {
+      this.debugNote = '读取本地课表失败';
+    }
+
+    this.prefsReady = true;
+    hilog.info(DOMAIN, 'Index', 'init done: webCapable=%{public}s webReady=%{public}s scripts=%{public}s',
+      `${this.webCapable}`, `${this.webReady}`, `${this.scriptLoaded}`);
+    this.maybeAutoSync();
+  }
+
+  private maybeAutoSync(): void {
+    if (this.autoSyncStarted || !this.prefsReady || !this.webReady) {
+      return;
+    }
+    this.autoSyncStarted = true;
+    if (this.autoLogin) {
+      this.syncNow(true);
+    }
+  }
+
+  private toast(message: string): void {
+    this.getUIContext().getPromptAction().showToast({ message: message });
+  }
+
+  private refreshTheme(): void {
+    const systemDark = this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    const dark = this.colorMode === 'dark' || (this.colorMode === 'auto' && systemDark);
+    this.theme = themeFor(this.themeId, dark);
+    // 课程卡片颜色缓存在 layouts 里，换主题后必须重算。
+    this.rebuildLayout();
+    this.applySystemBars();
+  }
+
+  /** 让状态栏和底部导航条融入页面背景，图标颜色随深浅模式反转。 */
+  private applySystemBars(): void {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      window.getLastWindow(context).then((win: window.Window) => {
+        const system = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+        const indicator = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+        AppStorage.setOrCreate('topInset', px2vp(system.topRect.height));
+        AppStorage.setOrCreate('bottomInset',
+          px2vp(Math.max(system.bottomRect.height, indicator.bottomRect.height)));
+        try {
+          win.setWindowBackgroundColor(this.theme.bg);
+        } catch (err) {
+          // 个别设备不支持窗口背景色时忽略
+        }
+        win.setWindowSystemBarProperties({
+          statusBarColor: '#00000000',
+          navigationBarColor: this.theme.card,
+          statusBarContentColor: this.theme.ink,
+          navigationBarContentColor: this.theme.ink
+        }).catch(() => {
+        });
+      }).catch(() => {
+      });
+    } catch (err) {
+      // 预览器等没有窗口的环境直接忽略
+    }
+  }
+
+  private onSystemColorModeChange(): void {
+    if (this.colorMode === 'auto') {
+      this.refreshTheme();
+      setTimeout(() => {
+        if (this.colorMode === 'auto') {
+          this.refreshTheme();
+        }
+      }, 120);
+    }
+  }
+
+  private applyColorMode(): void {
+    try {
+      const host = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      let mode: ConfigurationConstant.ColorMode = ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
+      if (this.colorMode === 'dark') {
+        mode = ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+      } else if (this.colorMode === 'light') {
+        mode = ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+      }
+      host.getApplicationContext().setColorMode(mode);
+    } catch (err) {
+      hilog.warn(DOMAIN, 'Index', 'set color mode failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  private selectTheme(option: ThemeOption): void {
+    this.themeId = option.id;
+    AppPrefs.setString('themeId', option.id);
+    this.refreshTheme();
+  }
+
+  private selectColorMode(mode: string): void {
+    this.colorMode = mode;
+    AppPrefs.setString('colorMode', mode);
+    this.applyColorMode();
+    this.refreshTheme();
+    // setColorMode 触发的配置更新可能晚于这一次状态刷新，
+    // 补一次刷新，避免个别文本停留在旧颜色。
+    setTimeout(() => {
+      this.refreshTheme();
+    }, 120);
+  }
+
+  private openSheet(kind: number): void {
+    this.sheetKind = kind;
+    this.showSheet = true;
+  }
+
+  private closeSheet(): void {
+    this.showSheet = false;
+  }
+
+  private async syncNow(auto: boolean): Promise<void> {
+    if (this.syncing) {
+      return;
+    }
+    if (!this.webCapable) {
+      this.status = '当前环境不支持 Web 组件，请使用模拟器或真机';
+      this.toast('当前环境不支持 Web 组件');
+      return;
+    }
+    if (!this.scriptLoaded) {
+      this.status = '注入脚本加载失败';
+      this.toast('注入脚本加载失败');
+      return;
+    }
+    if (!this.webReady || this.jwxt === null) {
+      this.status = '教务浏览器正在连接，请稍后再试';
+      this.toast('教务浏览器正在连接，请稍后再试');
+      return;
+    }
+    this.syncing = true;
+    this.status = auto ? '正在自动登录…' : '正在检查登录状态…';
+
+    try {
+      const check = await this.jwxt.checkSession();
+      if (check.state === 'success') {
+        await this.doSync();
+        return;
+      }
+      if (check.state === 'ready') {
+        let latest: LoginCheck = check;
+        if (!check.captcha && this.autoLogin) {
+          const credentials = await CredentialStore.load();
+          if (credentials) {
+            this.status = '正在登录教务系统…';
+            const loginResult = await this.jwxt.submitLogin(credentials.account, credentials.password, '');
+            if (loginResult.state === 'success') {
+              this.pendingSync = false;
+              await this.doSync();
+              return;
+            }
+            // 提交失败时学校会重载登录页并换一张验证码。
+            // 必须使用这次提交后探测到的状态，否则面板里是过期图片。
+            latest = {
+              state: 'ready',
+              captcha: loginResult.captcha || check.captcha,
+              image: loginResult.image || check.image,
+              message: loginResult.message || check.message
+            };
+          }
+        }
+        this.syncing = false;
+        this.pendingSync = true;
+        this.status = latest.captcha ? '需要验证码，请完成登录' : '请登录教务系统';
+        this.openLoginSheet(latest);
+        return;
+      }
+      this.syncing = false;
+      this.status = check.message || '无法连接教务系统';
+    } catch (err) {
+      this.syncing = false;
+      this.status = '同步失败，请稍后重试';
+    }
+  }
+
+  private async doSync(): Promise<void> {
+    if (this.jwxt === null) {
+      this.syncing = false;
+      return;
+    }
+    this.status = '正在更新课表…';
+    try {
+      const outcome = await this.jwxt.syncSchedule(this.selectedTerm);
+      this.syncing = false;
+      if (outcome.ok && outcome.schedule !== null) {
+        const schedule = outcome.schedule;
+        this.schedule = schedule;
+        this.selectedTerm = schedule.term;
+        this.currentWeek = Math.min(Math.max(1, this.currentWeek), Math.max(1, schedule.maxWeek));
+        this.calibrationWeek = this.currentWeek;
+        this.loggedIn = true;
+        if (this.store !== null) {
+          this.store.save(schedule);
+        }
+        await AppPrefs.setString('selectedTerm', schedule.term);
+        this.status = `本地课表 · 更新于 ${formatStamp(schedule.savedAt)}`;
+        this.rebuildLayout();
+        this.toast('课表已更新');
+        return;
+      }
+      if (outcome.needLogin) {
+        this.status = '登录已过期，请重新登录';
+        const check = await this.jwxt.readLoginState();
+        this.pendingSync = true;
+        this.openLoginSheet(check);
+        return;
+      }
+      // 之前选中的学期可能已从学校页面下线，回退到学校当前学期再试一次。
+      if (this.selectedTerm && outcome.message.indexOf('尚未开放') >= 0) {
+        this.selectedTerm = '';
+        await AppPrefs.remove('selectedTerm');
+        this.status = '正在切换到学校当前学期…';
+        this.syncing = true;
+        await this.doSync();
+        return;
+      }
+      this.status = outcome.message;
+    } catch (err) {
+      this.syncing = false;
+      this.status = '同步失败，请稍后重试';
+    }
+  }
+
+  private openLoginSheet(check: LoginCheck): void {
+    if (check.state === 'success') {
+      this.loggedIn = true;
+      this.closeSheet();
+      return;
+    }
+    this.loginAccount = this.savedAccount;
+    this.loginPassword = '';
+    this.loginCaptchaRequired = check.captcha;
+    this.captchaImage = check.image;
+    this.loginCaptcha = '';
+    this.loginMessage = check.message || '请输入账号和密码';
+    this.loginBusy = false;
+    this.openSheet(1);
+    // 本机已保存凭证时，把密码预填到输入框，省去验证码场景下重复输入。
+    CredentialStore.load().then((credentials) => {
+      if (credentials && this.loginAccount === credentials.account && !this.loginPassword) {
+        this.loginPassword = credentials.password;
+      }
+    });
+  }
+
+  private async openLoginFromProfile(): Promise<void> {
+    this.pendingSync = false;
+    this.openSheet(1);
+    this.loginBusy = true;
+    this.loginMessage = '正在连接学校登录页…';
+    this.loginAccount = this.savedAccount;
+    this.loginPassword = '';
+    this.loginCaptcha = '';
+    this.captchaImage = '';
+    if (this.jwxt === null) {
+      this.loginBusy = false;
+      this.loginMessage = '应用尚未初始化完成，请完全退出应用后重试';
+      return;
+    }
+    try {
+      const check = await this.jwxt.prepareLogin();
+      this.loginBusy = false;
+      if (check.state === 'success') {
+        this.loggedIn = true;
+        this.closeSheet();
+        this.status = '已登录 · 教务连接正常';
+        return;
+      }
+      if (check.state === 'ready') {
+        this.loginCaptchaRequired = check.captcha;
+        this.captchaImage = check.image;
+        this.loginMessage = check.captcha ? '请输入账号、密码和验证码' : '请输入账号和密码';
+      } else {
+        this.loginMessage = check.message || '登录页加载失败';
+      }
+    } catch (err) {
+      this.loginBusy = false;
+      this.loginMessage = '无法启动登录页：' + (err as Error).message;
+      hilog.error(DOMAIN, 'Index', 'prepare login failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  private async refreshCaptcha(): Promise<void> {
+    if (this.jwxt === null) {
+      return;
+    }
+    this.loginBusy = true;
+    this.loginMessage = '正在刷新验证码…';
+    try {
+      const check = await this.jwxt.prepareLogin(12000);
+      this.loginBusy = false;
+      if (check.state === 'ready') {
+        this.loginCaptchaRequired = check.captcha;
+        this.captchaImage = check.image;
+        this.loginMessage = check.captcha ? '验证码已刷新' : '当前无需验证码';
+      } else {
+        this.loginMessage = check.message || '刷新失败';
+      }
+    } catch (err) {
+      this.loginBusy = false;
+      this.loginMessage = '刷新失败：' + (err as Error).message;
+    }
+  }
+
+  private async submitLogin(): Promise<void> {
+    if (this.jwxt === null || this.loginBusy) {
+      return;
+    }
+    if (!this.loginAccount.trim() || !this.loginPassword) {
+      this.loginMessage = '请输入账号和密码';
+      return;
+    }
+    if (this.loginCaptchaRequired && !this.loginCaptcha.trim()) {
+      this.loginMessage = '请输入验证码';
+      return;
+    }
+    this.loginBusy = true;
+    this.loginMessage = '正在提交登录…';
+    try {
+      const result = await this.jwxt.submitLogin(this.loginAccount.trim(), this.loginPassword, this.loginCaptcha.trim());
+      if (result.state === 'success') {
+        if (this.saveCredential) {
+          const saved = await CredentialStore.save(this.loginAccount.trim(), this.loginPassword);
+          this.hasCredential = saved;
+          if (saved) {
+            this.savedAccount = this.loginAccount.trim();
+            await AppPrefs.setString('savedAccount', this.savedAccount);
+          }
+        }
+        this.loggedIn = true;
+        this.loginBusy = false;
+        this.closeSheet();
+        this.loginPassword = '';
+        this.loginMessage = '';
+        this.status = '已登录 · 正在同步课表';
+        this.pendingSync = false;
+        this.syncing = true;
+        await this.doSync();
+        return;
+      }
+      this.loginBusy = false;
+      if (result.state === 'ready') {
+        this.loginCaptchaRequired = result.captcha;
+        this.captchaImage = result.image;
+        this.loginMessage = result.message || '登录未完成，请检查验证码';
+      } else {
+        this.loginMessage = result.message || '登录失败，请重试';
+      }
+    } catch (err) {
+      this.loginBusy = false;
+      this.loginMessage = '登录失败，请重试';
+    }
+  }
+
+  private logout(): void {
+    AlertDialog.show({
+      title: '退出登录？',
+      message: '将清除这台设备上保存的登录凭证和校园服务会话。已保存的课表仍然保留。',
+      autoCancel: true,
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        }
+      },
+      secondaryButton: {
+        value: '确认退出',
+        fontColor: this.theme.danger,
+        action: () => {
+          this.doLogout();
+        }
+      }
+    });
+  }
+
+  private async doLogout(): Promise<void> {
+    await CredentialStore.remove();
+    this.hasCredential = false;
+    this.savedAccount = '';
+    this.loggedIn = false;
+    await AppPrefs.remove('savedAccount');
+    try {
+      webview.WebStorage.deleteAllData();
+      webview.WebCookieManager.clearAllCookiesSync();
+      await webview.WebCookieManager.saveCookieAsync();
+    } catch (err) {
+      // 忽略
+    }
+    this.status = '已退出登录 · 本地课表继续保留';
+    this.toast('已退出登录');
+  }
+
+  private openWeb(target: string, title: string, kind: string): void {
+    router.pushUrl({
+      url: 'pages/WebPage',
+      params: { url: target, title: title, kind: kind }
+    }).catch(() => {
+      this.toast('无法打开页面');
+    });
+  }
+
+  private openLink(link: QuickLink): void {
+    if (!link.enabled) {
+      this.toast('该功能将在下个版本提供');
+      return;
+    }
+    this.openWeb(link.url, link.title, link.kind);
+  }
+
+  /** 第 5 节前是午休，第 9 节前是晚餐，课程位置要跳过这两条分界带。 */
+  private breakOffset(period: number): number {
+    let offset = 0;
+    if (period > 4) {
+      offset += BREAK_H;
+    }
+    if (period > 8) {
+      offset += BREAK_H;
+    }
+    return offset;
+  }
+
+  private rebuildLayout(): void {
+    if (this.schedule === null || this.dayWidth <= 0) {
+      this.layouts = [];
+      return;
+    }
+    const visible = this.schedule.at(this.currentWeek);
+    const counts: Map<string, number> = new Map();
+    for (let i = 0; i < visible.length; i++) {
+      const course = visible[i];
+      const key = `${course.day}-${course.start}-${course.end}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const used: Map<string, number> = new Map();
+    const result: CourseLayout[] = [];
+    for (let i = 0; i < visible.length; i++) {
+      const course = visible[i];
+      const key = `${course.day}-${course.start}-${course.end}`;
+      const total = counts.get(key) ?? 1;
+      const index = used.get(key) ?? 0;
+      used.set(key, index + 1);
+      const layout = new CourseLayout(course);
+      const columnWidth = (this.dayWidth - 1) / total;
+      layout.x = (course.day - 1) * this.dayWidth + index * columnWidth + 0.5;
+      const top = (course.start - 1) * CELL_H + this.breakOffset(course.start) + 1;
+      const bottom = course.end * CELL_H + this.breakOffset(course.end) + 1;
+      layout.y = top;
+      layout.w = columnWidth - 1;
+      layout.h = bottom - top - 2;
+      const palette = this.theme.courses[colorIndex(course.name, this.theme.courses.length)];
+      layout.bg = palette.bg;
+      layout.fg = palette.fg;
+      result.push(layout);
+    }
+    this.layouts = result;
+  }
+
+  private changeWeek(delta: number): void {
+    if (this.schedule === null) {
+      return;
+    }
+    const next = this.currentWeek + delta;
+    if (next < 1 || next > this.schedule.maxWeek) {
+      return;
+    }
+    this.currentWeek = next;
+    this.calibrationWeek = next;
+    this.rebuildLayout();
+  }
+
+  private setCurrentWeek(): void {
+    this.currentWeek = this.calibrationWeek;
+    AppPrefs.setNumber('currentWeek', this.calibrationWeek);
+    this.closeSheet();
+    this.rebuildLayout();
+    this.toast(`已将第 ${this.calibrationWeek} 周设为本周`);
+  }
+
+  private weekCourseCount(): number {
+    if (this.schedule === null) {
+      return 0;
+    }
+    return this.schedule.at(this.currentWeek).length;
+  }
+
+  private maxWeekValue(): number {
+    return this.schedule === null ? 20 : this.schedule.maxWeek;
+  }
+
+  @Builder TabItem(index: number, symbol: Resource, label: string) {
+    Column() {
+      SymbolGlyph(symbol)
+        .fontSize(22)
+        .fontColor([this.currentTab === index ? this.theme.primary : this.theme.muted])
+      Text(label)
+        .fontSize(11)
+        .fontColor(this.currentTab === index ? this.theme.primary : this.theme.muted)
+        .margin({ top: 2 })
+    }
+    .layoutWeight(1)
+    .height(52)
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.currentTab = index;
+    })
+  }
+
+  @Builder TopBar(title: string, subtitle: string, showSync: boolean) {
+    Column() {
+      Row() {
+        Column() {
+          Text(title)
+            .fontSize(24)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.theme.ink)
+          Text(subtitle)
+            .fontSize(12)
+            .fontColor(this.theme.muted)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        if (showSync) {
+          Stack() {
+            if (this.syncing) {
+              LoadingProgress()
+                .width(24)
+                .height(24)
+                .color(this.theme.primary)
+            } else {
+              Text('⟳')
+                .fontSize(22)
+                .fontColor(this.theme.primary)
+            }
+          }
+          .width(44)
+          .height(44)
+          .borderRadius(22)
+          .backgroundColor(this.theme.primarySoft)
+          .onClick(() => {
+            if (!this.syncing) {
+              this.syncNow(false);
+            }
+          })
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 18, right: 18, top: 14, bottom: 8 })
+  }
+
+  @Builder StatusLine() {
+    Row() {
+      Circle()
+        .width(7)
+        .height(7)
+        .fill(this.syncing ? this.theme.primary : (this.loggedIn ? this.theme.ok : this.theme.muted))
+      Text(this.status)
+        .fontSize(12)
+        .fontColor(this.syncing ? this.theme.primaryDeep : this.theme.muted)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ left: 6 })
+        .layoutWeight(1)
+      if (this.schedule !== null) {
+        Text(`本周 ${this.weekCourseCount()} 门`)
+          .fontSize(11)
+          .fontColor(this.theme.muted)
+      }
+    }
+    .width('100%')
+    .padding({ left: 18, right: 18, bottom: 6 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder WeekBar() {
+    Row() {
+      Text('‹')
+        .fontSize(28)
+        .fontColor(this.currentWeek > 1 ? this.theme.primary : this.theme.disabled)
+        .width(36)
+        .height(36)
+        .textAlign(TextAlign.Center)
+        .borderRadius(18)
+        .onClick(() => {
+          this.changeWeek(-1);
+        })
+
+      Column() {
+        Text(`第 ${this.currentWeek} 周`)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.theme.ink)
+        Text(this.schedule !== null ? `共 ${this.schedule.maxWeek} 教学周` : '等待同步')
+          .fontSize(10)
+          .fontColor(this.theme.muted)
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Center)
+
+      Text('›')
+        .fontSize(28)
+        .fontColor(this.schedule !== null && this.currentWeek < this.schedule.maxWeek ? this.theme.primary : this.theme.disabled)
+        .width(36)
+        .height(36)
+        .textAlign(TextAlign.Center)
+        .borderRadius(18)
+        .onClick(() => {
+          this.changeWeek(1);
+        })
+
+      Text('校准')
+        .fontSize(12)
+        .fontColor(this.theme.primary)
+        .backgroundColor(this.theme.primarySoft)
+        .borderRadius(14)
+        .padding({ left: 11, right: 11, top: 6, bottom: 6 })
+        .margin({ left: 4 })
+        .onClick(() => {
+          if (this.schedule === null) {
+            this.toast('请先同步课表');
+            return;
+          }
+          this.calibrationWeek = this.currentWeek;
+          this.openSheet(3);
+        })
+    }
+    .width('100%')
+    .padding({ left: 18, right: 18, bottom: 6 })
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder DayHeader() {
+    Row() {
+      Column() {
+        Text('节次')
+          .fontSize(10)
+          .fontColor(this.theme.muted)
+      }
+      .width(TIME_W)
+      .height(34)
+      .justifyContent(FlexAlign.Center)
+
+      ForEach(DAY_LABELS, (label: string, index: number) => {
+        Column() {
+          Text(`周${label}`)
+            .fontSize(12)
+            .fontWeight(this.todayDay === index + 1 ? FontWeight.Bold : FontWeight.Normal)
+            .fontColor(this.todayDay === index + 1 ? this.theme.primary : this.theme.ink)
+          if (this.todayDay === index + 1) {
+            Circle()
+              .width(4)
+              .height(4)
+              .fill(this.theme.primary)
+              .margin({ top: 3 })
+          }
+        }
+        .layoutWeight(1)
+        .height(34)
+        .justifyContent(FlexAlign.Center)
+      }, (label: string) => label)
+    }
+    .width('100%')
+    .padding({ left: 4, right: 8 })
+  }
+
+  @Builder TimeColumn() {
+    Column() {
+      ForEach(DEFAULT_STARTS, (start: string, index: number) => {
+        if (index === 4 || index === 8) {
+          Column()
+            .width(TIME_W)
+            .height(BREAK_H)
+            .backgroundColor(this.theme.bg)
+            .border({ width: { top: 0.5, bottom: 0.5 }, color: this.theme.line })
+        }
+        Column() {
+          Text(`${index + 1}`)
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.theme.ink)
+          Text(start)
+            .fontSize(8)
+            .fontColor(this.theme.muted)
+            .margin({ top: 2 })
+          Text(DEFAULT_ENDS[index])
+            .fontSize(8)
+            .fontColor(this.theme.faint)
+        }
+        .width(TIME_W)
+        .height(CELL_H)
+        .justifyContent(FlexAlign.Center)
+      }, (start: string) => start)
+    }
+    .width(TIME_W)
+  }
+
+  @Builder BreakBand(label: string, from: string, to: string) {
+    Row() {
+      Text(`${label} · ${from} – ${to}`)
+        .fontSize(9)
+        .fontColor(this.theme.muted)
+    }
+    .width('100%')
+    .height(BREAK_H)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor(this.theme.bg)
+    .border({ width: { top: 0.5, bottom: 0.5 }, color: this.theme.line })
+  }
+
+  @Builder GridBackground() {
+    Column() {
+      ForEach(DEFAULT_STARTS, (start: string, rowIndex: number) => {
+        if (rowIndex === 4) {
+          this.BreakBand('午休', DEFAULT_ENDS[3], DEFAULT_STARTS[4])
+        }
+        if (rowIndex === 8) {
+          this.BreakBand('晚餐', DEFAULT_ENDS[7], DEFAULT_STARTS[8])
+        }
+        Row() {
+          ForEach(DAY_LABELS, (label: string, dayIndex: number) => {
+            Column()
+              .layoutWeight(1)
+              .height(CELL_H)
+              .backgroundColor(this.todayDay === dayIndex + 1 ? tint(this.theme.primary, '0A') : Color.Transparent)
+              .border({ width: { right: 0.5, bottom: 0.5 }, color: this.theme.line })
+          }, (label: string) => `${label}-${rowIndex}`)
+        }
+        .height(CELL_H)
+      }, (start: string) => `row-${start}`)
+    }
+    .width('100%')
+    .height(CELL_H * 12 + BREAK_H * 2)
+  }
+
+  private titleSize(width: number, name: string, height: number): number {
+    if (width < 30) {
+      return 8;
+    }
+    if (width < 44) {
+      return 9;
+    }
+    // 短名称在够高的卡片里放大一号，优先保证可读性。
+    if (height >= 60 && name.length <= 6) {
+      return 12;
+    }
+    if (height >= 60 && name.length <= 9) {
+      return 11;
+    }
+    if (name.length > 16) {
+      return 8;
+    }
+    if (name.length > 12) {
+      return 9;
+    }
+    return 10;
+  }
+
+  private titleLines(height: number): number {
+    return height < 50 ? 2 : (height < 100 ? 5 : 6);
+  }
+
+  @Builder CourseCard(layout: CourseLayout) {
+    Column() {
+      Text(layout.course.name)
+        .fontSize(this.titleSize(layout.w, layout.course.name, layout.h))
+        .lineHeight(this.titleSize(layout.w, layout.course.name, layout.h) + 2)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(layout.fg)
+        .maxLines(this.titleLines(layout.h))
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .wordBreak(WordBreak.BREAK_ALL)
+        .width('100%')
+        .textAlign(TextAlign.Center)
+      if (layout.course.room) {
+        Text(layout.course.room)
+          .fontSize(Math.min(9, this.titleSize(layout.w, layout.course.name, layout.h)))
+          .lineHeight(11)
+          .fontColor(layout.fg)
+          .maxLines(layout.h > 60 ? 2 : 1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .wordBreak(WordBreak.BREAK_ALL)
+          .width('100%')
+          .margin({ top: 1 })
+          .textAlign(TextAlign.Center)
+      }
+    }
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .padding({ left: 4, right: 3, top: 2, bottom: 1 })
+    .width(layout.w)
+    .height(layout.h)
+    .backgroundColor(layout.bg)
+    .borderRadius(8)
+    .position({ x: layout.x, y: layout.y })
+    .zIndex(2)
+    .onClick(() => {
+      this.selectedCourse = layout.course;
+      this.openSheet(2);
+    })
+  }
+
+  @Builder EmptySchedule() {
+    Column() {
+      SymbolGlyph($r('sys.symbol.calendar'))
+        .fontSize(44)
+        .fontColor([this.theme.disabled])
+      Text('尚未同步课表')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.theme.ink)
+        .margin({ top: 12 })
+      Text('登录教务系统后，课表会保存在本机，离线也能查看。')
+        .fontSize(12)
+        .fontColor(this.theme.muted)
+        .margin({ top: 8 })
+        .textAlign(TextAlign.Center)
+        .padding({ left: 30, right: 30 })
+      Text(this.syncing ? '正在同步…' : '登录并同步')
+        .fontSize(15)
+        .fontColor(this.theme.onPrimary)
+        .backgroundColor(this.theme.primary)
+        .borderRadius(22)
+        .padding({ left: 28, right: 28, top: 10, bottom: 10 })
+        .margin({ top: 22 })
+        .onClick(() => {
+          if (!this.syncing) {
+            this.syncNow(false);
+          }
+        })
+      if (!this.hasCredential) {
+        Text('首次使用需要输入学校教务账号')
+          .fontSize(11)
+          .fontColor(this.theme.muted)
+          .margin({ top: 10 })
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .justifyContent(FlexAlign.Center)
+    .padding({ bottom: 40 })
+  }
+
+  @Builder ScheduleView() {
+    Column() {
+      this.TopBar('江小汉快快下课', this.selectedTerm || '登录后自动获取学期', true)
+      this.StatusLine()
+      this.WeekBar()
+      this.DayHeader()
+      if (this.schedule === null) {
+        this.EmptySchedule()
+      } else {
+        Scroll() {
+          Row() {
+            this.TimeColumn()
+            Stack() {
+              this.GridBackground()
+              ForEach(this.layouts, (layout: CourseLayout) => {
+                this.CourseCard(layout)
+              }, (layout: CourseLayout) =>
+                `${layout.course.day}-${layout.course.start}-${layout.course.end}-${layout.course.name}-${layout.x}-${layout.bg}-${layout.fg}`)
+            }
+            .layoutWeight(1)
+            .height(CELL_H * 12 + BREAK_H * 2)
+            .onAreaChange((oldArea: Area, newArea: Area) => {
+              const width = Number.parseFloat(newArea.width.toString());
+              const nextWidth = width / 7;
+              if (Number.isFinite(nextWidth) && Math.abs(nextWidth - this.dayWidth) > 0.5) {
+                this.dayWidth = nextWidth;
+                this.rebuildLayout();
+              }
+            })
+          }
+          .width('100%')
+          .padding({ left: 4, right: 8 })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
+  @Builder CommonView() {
+    Column() {
+      this.TopBar('常用入口', '校园服务，一触即达', false)
+      Scroll() {
+        Column() {
+          Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
+            ForEach(this.links, (link: QuickLink, index: number) => {
+              Column() {
+                Row() {
+                  Stack() {
+                    SymbolGlyph(link.symbol)
+                      .fontSize(20)
+                      .fontColor([this.theme.courses[index % this.theme.courses.length].fg])
+                  }
+                  .width(42)
+                  .height(42)
+                  .backgroundColor(this.theme.courses[index % this.theme.courses.length].bg)
+                  .borderRadius(12)
+                  Blank()
+                  if (!link.enabled) {
+                    Text('即将支持')
+                      .fontSize(9)
+                      .fontColor(this.theme.muted)
+                      .backgroundColor(this.theme.bg)
+                      .borderRadius(8)
+                      .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                  }
+                }
+                .width('100%')
+
+                Text(link.title)
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(link.enabled ? this.theme.ink : this.theme.faint)
+                  .margin({ top: 10 })
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                Text(link.subtitle)
+                  .fontSize(11)
+                  .fontColor(this.theme.muted)
+                  .margin({ top: 3 })
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .width('48.5%')
+              .margin({ bottom: 10 })
+              .padding(14)
+              .alignItems(HorizontalAlign.Start)
+              .backgroundColor(this.theme.card)
+              .borderRadius(18)
+              .opacity(link.enabled ? 1 : 0.72)
+              .onClick(() => {
+                this.openLink(link);
+              })
+            }, (link: QuickLink) => `${link.title}-${this.theme.id}-${this.theme.dark}`)
+          }
+          .width('100%')
+
+          Column() {
+            Text('关于这些服务')
+              .fontSize(13)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.theme.ink)
+              .width('100%')
+            Text('电费、报修等页面由学校统一身份认证保护，登录后会跳转到学校官方页面。大物实验报告系统仅在校园网内开放。')
+              .fontSize(11)
+              .fontColor(this.theme.muted)
+              .lineHeight(18)
+              .margin({ top: 6 })
+              .width('100%')
+          }
+          .width('100%')
+          .padding(14)
+          .backgroundColor(this.theme.card)
+          .borderRadius(18)
+          .margin({ top: 14 })
+        }
+        .width('100%')
+        .padding({ left: 18, right: 18, bottom: 20 })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
+  @Builder ProfileView() {
+    Column() {
+      this.TopBar('我的', '账号与本机设置', false)
+      Scroll() {
+        Column() {
+          Row() {
+            Text('江')
+              .fontSize(22)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.theme.onPrimary)
+              .width(50)
+              .height(50)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.theme.primary)
+              .borderRadius(25)
+            Column() {
+              Text(this.loggedIn ? '已登录教务系统' : '未登录')
+                .fontSize(16)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(this.theme.ink)
+              Text(this.savedAccount ? `教务账号 ${this.savedAccount}` : '登录后自动同步课表')
+                .fontSize(11)
+                .fontColor(this.theme.muted)
+                .margin({ top: 4 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            .margin({ left: 12 })
+            Circle()
+              .width(8)
+              .height(8)
+              .fill(this.loggedIn ? this.theme.ok : this.theme.disabled)
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor(this.theme.card)
+          .borderRadius(18)
+          .alignItems(VerticalAlign.Center)
+
+          Text(`运行状态：Web${this.webCapable ? '可用' : '不可用'} · ${this.webReady ? '已连接' : '未连接'} · 脚本${this.scriptLoaded ? '已加载' : '未加载'} · 初始化${this.prefsReady ? '完成' : '进行中'}`)
+            .fontSize(10)
+            .fontColor(this.theme.muted)
+            .width('100%')
+            .textAlign(TextAlign.Center)
+            .margin({ top: 8 })
+          Text(`当前状态：${this.status}`)
+            .fontSize(11)
+            .fontColor(this.theme.muted)
+            .width('100%')
+            .textAlign(TextAlign.Center)
+            .margin({ top: 4 })
+          if (this.debugNote) {
+            Text('调试：' + this.debugNote)
+              .fontSize(10)
+              .fontColor(this.theme.danger)
+              .width('100%')
+              .textAlign(TextAlign.Center)
+              .margin({ top: 4 })
+          }
+
+          Column() {
+            Row() {
+              Column() {
+                Text('自动登录')
+                  .fontSize(14)
+                  .fontColor(this.theme.ink)
+                Text('凭证使用系统密钥加密保存在本机')
+                  .fontSize(10)
+                  .fontColor(this.theme.muted)
+                  .margin({ top: 3 })
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.autoLogin })
+                .selectedColor(this.theme.primary)
+                .onChange((isOn: boolean) => {
+                  this.autoLogin = isOn;
+                  AppPrefs.setBool('autoLogin', isOn);
+                })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+
+            Divider()
+              .color(this.theme.line)
+              .margin({ top: 12, bottom: 12 })
+
+            this.ProfileRow('更新课表', '从教务系统获取最新课表', () => {
+              if (!this.syncing) {
+                this.syncNow(false);
+              }
+            }, false)
+            this.ProfileRow('登录 / 更换账号', '输入教务账号、密码和验证码', () => {
+              this.openLoginFromProfile();
+            }, false)
+            this.ProfileRow('清除登录凭证', '注销本机保存的账号与校园会话', () => {
+              this.logout();
+            }, true)
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor(this.theme.card)
+          .borderRadius(18)
+          .margin({ top: 12 })
+
+          Column() {
+            Text('外观')
+              .fontSize(14)
+              .fontColor(this.theme.ink)
+              .width('100%')
+            Text('主题')
+              .fontSize(10)
+              .fontColor(this.theme.muted)
+              .width('100%')
+              .margin({ top: 10 })
+
+            Row({ space: 8 }) {
+              ForEach(THEME_OPTIONS, (option: ThemeOption) => {
+                Column() {
+                  Row() {
+                    Circle()
+                      .width(16)
+                      .height(16)
+                      .fill(this.theme.dark ? option.darkPrimary : option.primary)
+                    Blank()
+                    if (this.themeId === option.id) {
+                      Text('✓')
+                        .fontSize(11)
+                        .fontColor(this.theme.dark ? option.darkPrimary : option.primary)
+                    }
+                  }
+                  .width('100%')
+
+                  Text(option.name)
+                    .fontSize(11)
+                    .fontColor(this.themeId === option.id ? this.theme.ink : this.theme.muted)
+                    .width('100%')
+                    .margin({ top: 7 })
+                }
+                .layoutWeight(1)
+                .padding(10)
+                .backgroundColor(this.theme.dark ? option.darkBg : option.bg)
+                .border({
+                  width: this.themeId === option.id ? 1.5 : 1,
+                  color: this.themeId === option.id ?
+                    (this.theme.dark ? option.darkPrimary : option.primary) : this.theme.line
+                })
+                .borderRadius(12)
+                .onClick(() => {
+                  this.selectTheme(option);
+                })
+              }, (option: ThemeOption) => option.id)
+            }
+            .width('100%')
+            .margin({ top: 8 })
+
+            Text('显示模式')
+              .fontSize(10)
+              .fontColor(this.theme.muted)
+              .width('100%')
+              .margin({ top: 14 })
+
+            Row({ space: 8 }) {
+              this.ModeChip('跟随系统', 'auto')
+              this.ModeChip('浅色', 'light')
+              this.ModeChip('深色', 'dark')
+            }
+            .width('100%')
+            .margin({ top: 8 })
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor(this.theme.card)
+          .borderRadius(18)
+          .margin({ top: 12 })
+
+          Column() {
+            this.ProfileRow('关于本应用', '个人使用的江汉大学课表助手', () => {
+              this.aboutExpanded = !this.aboutExpanded;
+            }, false)
+            if (this.aboutExpanded) {
+              Text('这是个人使用的非官方应用，用于在 HarmonyOS 上查看自己的课表和进入学校常用网站。\n\n所有数据只保存在本机；不收集、不上传任何信息。学校网站改版可能导致同步失败。')
+                .fontSize(11)
+                .fontColor(this.theme.muted)
+                .lineHeight(18)
+                .width('100%')
+                .margin({ top: 10 })
+            }
+          }
+          .width('100%')
+          .padding(16)
+          .backgroundColor(this.theme.card)
+          .borderRadius(18)
+          .margin({ top: 12 })
+
+          Text('版本 0.1.0 · 作者·凩新')
+            .fontSize(10)
+            .fontColor(this.theme.faint)
+            .margin({ top: 18, bottom: 12 })
+        }
+        .width('100%')
+        .padding({ left: 18, right: 18, bottom: 20 })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
+  @Builder ModeChip(label: string, mode: string) {
+    Text(label)
+      .fontSize(12)
+      .fontColor(this.colorMode === mode ? this.theme.primary : this.theme.muted)
+      .backgroundColor(this.colorMode === mode ? this.theme.primarySoft : this.theme.bg)
+      .borderRadius(14)
+      .layoutWeight(1)
+      .textAlign(TextAlign.Center)
+      .padding({ top: 8, bottom: 8 })
+      .onClick(() => {
+        this.selectColorMode(mode);
+      })
+  }
+
+  @Builder ProfileRow(title: string, subtitle: string, action: () => void, danger: boolean) {
+    Row() {
+      Column() {
+        Text(title)
+          .fontSize(14)
+          .fontColor(danger ? this.theme.danger : this.theme.ink)
+        Text(subtitle)
+          .fontSize(10)
+          .fontColor(this.theme.muted)
+          .margin({ top: 3 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      Text('›')
+        .fontSize(20)
+        .fontColor(this.theme.disabled)
+    }
+    .width('100%')
+    .padding({ top: 9, bottom: 9 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(action)
+  }
+
+  @Builder BottomBar() {
+    Row() {
+      this.TabItem(0, $r('sys.symbol.calendar'), '课表')
+      this.TabItem(1, $r('sys.symbol.square_grid_2x2'), '常用')
+      this.TabItem(2, $r('sys.symbol.person'), '我的')
+    }
+    .width('100%')
+    .height(56 + this.bottomInset)
+    .padding({ bottom: this.bottomInset })
+    .backgroundColor(this.theme.card)
+    .border({ width: { top: 0.5 }, color: this.theme.line })
+  }
+
+  @Builder LoginSheet() {
+    Column() {
+      Row() {
+        Text('登录教务系统')
+          .fontSize(19)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.theme.ink)
+        Blank()
+        Text('×')
+          .fontSize(22)
+          .fontColor(this.theme.muted)
+          .width(32)
+          .height(32)
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.closeSheet();
+            this.loginPassword = '';
+            this.loginCaptcha = '';
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Text('使用学校教务系统的账号登录。凭证只会提交给江汉大学教务网站。')
+        .fontSize(11)
+        .fontColor(this.theme.muted)
+        .width('100%')
+        .margin({ top: 6, bottom: 14 })
+
+      TextInput({ placeholder: '账号 / 学号', text: this.loginAccount })
+        .height(46)
+        .borderRadius(12)
+        .fontColor(this.theme.ink)
+        .placeholderColor(this.theme.muted)
+        .backgroundColor(this.theme.bg)
+        .padding({ left: 14, right: 14 })
+        .onChange((value: string) => {
+          this.loginAccount = value;
+        })
+
+      TextInput({ placeholder: '密码', text: this.loginPassword })
+        .type(InputType.Password)
+        .height(46)
+        .borderRadius(12)
+        .fontColor(this.theme.ink)
+        .placeholderColor(this.theme.muted)
+        .backgroundColor(this.theme.bg)
+        .padding({ left: 14, right: 14 })
+        .margin({ top: 10 })
+        .onChange((value: string) => {
+          this.loginPassword = value;
+        })
+
+      if (this.loginCaptchaRequired) {
+        Row() {
+          TextInput({ placeholder: '验证码', text: this.loginCaptcha })
+            .height(46)
+            .borderRadius(12)
+            .fontColor(this.theme.ink)
+            .placeholderColor(this.theme.muted)
+            .backgroundColor(this.theme.bg)
+            .padding({ left: 14, right: 14 })
+            .layoutWeight(1)
+            .onChange((value: string) => {
+              this.loginCaptcha = value;
+            })
+          if (this.captchaImage) {
+            Image(this.captchaImage)
+              .width(104)
+              .height(46)
+              .objectFit(ImageFit.Contain)
+              .borderRadius(8)
+              .backgroundColor(this.theme.card)
+              .margin({ left: 8 })
+              .onClick(() => {
+                this.refreshCaptcha();
+              })
+          } else {
+            Text('刷新验证码')
+              .fontSize(12)
+              .fontColor(this.theme.primary)
+              .width(104)
+              .height(46)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(this.theme.primarySoft)
+              .borderRadius(10)
+              .margin({ left: 8 })
+              .onClick(() => {
+                this.refreshCaptcha();
+              })
+          }
+        }
+        .width('100%')
+        .margin({ top: 10 })
+      }
+
+      Row() {
+        Toggle({ type: ToggleType.Checkbox, isOn: this.saveCredential })
+          .selectedColor(this.theme.primary)
+          .onChange((isOn: boolean) => {
+            this.saveCredential = isOn;
+          })
+        Text('保存凭证并自动登录')
+          .fontSize(12)
+          .fontColor(this.theme.ink)
+          .margin({ left: 6 })
+        Blank()
+        if (this.loginCaptchaRequired) {
+          Text('刷新验证码')
+            .fontSize(11)
+            .fontColor(this.theme.primary)
+            .onClick(() => {
+              this.refreshCaptcha();
+            })
+        }
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      .alignItems(VerticalAlign.Center)
+
+      if (this.loginMessage) {
+        Text(this.loginMessage)
+          .fontSize(11)
+          .fontColor(this.loginMessage.indexOf('成功') >= 0 ? this.theme.ok : this.theme.muted)
+          .width('100%')
+          .margin({ top: 10 })
+      }
+
+      Row() {
+        Text('在网页中登录')
+          .fontSize(13)
+          .fontColor(this.theme.primary)
+          .onClick(() => {
+            this.closeSheet();
+            this.loginPassword = '';
+            this.loginCaptcha = '';
+            this.loginWebOpened = true;
+            this.openWeb(JWXT_LOGIN, '教务登录', 'jwxt-login');
+          })
+        Blank()
+        Text(this.loginBusy ? '请稍候…' : '登录')
+          .fontSize(15)
+          .fontColor(this.loginBusy ? this.theme.primary : this.theme.onPrimary)
+          .backgroundColor(this.loginBusy ? this.theme.primarySoft : this.theme.primary)
+          .borderRadius(20)
+          .padding({ left: 32, right: 32, top: 10, bottom: 10 })
+          .onClick(() => {
+            if (!this.loginBusy) {
+              this.submitLogin();
+            }
+          })
+      }
+      .width('100%')
+      .margin({ top: 16 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 18, bottom: 24 })
+    .backgroundColor(this.theme.card)
+  }
+
+  @Builder CourseDetailSheet() {
+    Column() {
+      Row() {
+        Column() {
+          Text(this.selectedCourse?.name ?? '')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.theme.ink)
+          Text(this.selectedCourse?.teacher ?? '')
+            .fontSize(12)
+            .fontColor(this.theme.muted)
+            .margin({ top: 4 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Text('×')
+          .fontSize(22)
+          .fontColor(this.theme.muted)
+          .width(32)
+          .height(32)
+          .textAlign(TextAlign.Center)
+          .onClick(() => {
+            this.closeSheet();
+          })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+
+      if (this.selectedCourse !== null) {
+        Column() {
+          this.DetailRow('上课时间',
+            `周${DAY_LABELS[this.selectedCourse.day - 1]} · 第 ${this.selectedCourse.start}-${this.selectedCourse.end} 节`)
+          this.DetailRow('具体时间',
+            `${DEFAULT_STARTS[this.selectedCourse.start - 1]}-${DEFAULT_ENDS[this.selectedCourse.end - 1]}`)
+          this.DetailRow('地点', this.selectedCourse.room || '未公布')
+          this.DetailRow('周次', `${this.selectedCourse.weeks.join(', ')} 周`)
+          this.DetailRow('学期', this.schedule?.term ?? this.selectedCourse.term)
+        }
+        .width('100%')
+        .padding(14)
+        .backgroundColor(this.theme.bg)
+        .borderRadius(12)
+        .margin({ top: 18 })
+      }
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 18, bottom: 24 })
+    .backgroundColor(this.theme.card)
+  }
+
+  @Builder DetailRow(label: string, value: string) {
+    Row() {
+      Text(label)
+        .fontSize(12)
+        .fontColor(this.theme.muted)
+        .width(70)
+      Text(value)
+        .fontSize(13)
+        .fontColor(this.theme.ink)
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ top: 7, bottom: 7 })
+    .alignItems(VerticalAlign.Top)
+  }
+
+  @Builder WeekSheet() {
+    Column() {
+      Text('设置当前教学周')
+        .fontSize(19)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.theme.ink)
+      Text('学校课表只提供周次，不提供开学日期。请选择你当前实际所在的周。')
+        .fontSize(11)
+        .fontColor(this.theme.muted)
+        .margin({ top: 6 })
+        .width('100%')
+
+      Text(`第 ${this.calibrationWeek} 周`)
+        .fontSize(30)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.theme.primary)
+        .margin({ top: 20 })
+
+      Slider({
+        value: this.calibrationWeek,
+        min: 1,
+        max: Math.max(1, this.maxWeekValue()),
+        step: 1
+      })
+        .selectedColor(this.theme.primary)
+        .showSteps(false)
+        .width('100%')
+        .margin({ top: 10 })
+        .onChange((value: number) => {
+          this.calibrationWeek = Math.round(value);
+        })
+
+      Row() {
+        Text('取消')
+          .fontSize(14)
+          .fontColor(this.theme.muted)
+          .padding({ left: 24, right: 24, top: 10, bottom: 10 })
+          .onClick(() => {
+            this.closeSheet();
+          })
+        Blank()
+        Text('设为本周')
+          .fontSize(14)
+          .fontColor(this.theme.onPrimary)
+          .backgroundColor(this.theme.primary)
+          .borderRadius(20)
+          .padding({ left: 26, right: 26, top: 10, bottom: 10 })
+          .onClick(() => {
+            this.setCurrentWeek();
+          })
+      }
+      .width('100%')
+      .margin({ top: 18 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 20, bottom: 24 })
+    .backgroundColor(this.theme.card)
+  }
+
+  @Builder ActiveSheet() {
+    if (this.sheetKind === 1) {
+      this.LoginSheet()
+    } else if (this.sheetKind === 2) {
+      this.CourseDetailSheet()
+    } else if (this.sheetKind === 3) {
+      this.WeekSheet()
+    }
+  }
+
+  build() {
+    Stack() {
+      Column() {
+        if (this.currentTab === 0) {
+          this.ScheduleView()
+        } else if (this.currentTab === 1) {
+          this.CommonView()
+        } else {
+          this.ProfileView()
+        }
+        this.BottomBar()
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ top: this.topInset })
+
+      // 隐藏的教务系统 Web 容器：负责登录、会话与课表解析。
+      // 预览器不支持 ArkWeb（capability 为 mock），此时不创建 Web，避免预览崩溃。
+      if (this.webCapable) {
+        Web({ src: JWXT_HOME, controller: this.controller })
+          .width('100%')
+          .height('100%')
+          .position({ x: 0, y: 0 })
+          .zIndex(-1)
+          .hitTestBehavior(HitTestMode.None)
+          .opacity(0.01)
+          .javaScriptAccess(true)
+          .domStorageAccess(true)
+          .fileAccess(false)
+          .mixedMode(MixedMode.All)
+          .onControllerAttached(() => {
+            this.webReady = true;
+            hilog.info(DOMAIN, 'Index', 'web controller attached');
+            this.maybeAutoSync();
+          })
+          .onPageBegin((event) => {
+            hilog.info(DOMAIN, 'Index', 'web begin: %{public}s', event.url);
+          })
+          .onPageEnd((event) => {
+            hilog.info(DOMAIN, 'Index', 'web end: %{public}s', event.url);
+          })
+          .onErrorReceive((event) => {
+            if (event.request.isMainFrame()) {
+              hilog.error(DOMAIN, 'Index', 'web error: %{public}s code=%{public}d',
+                event.error.getErrorInfo(), event.error.getErrorCode());
+            }
+          })
+          .onLoadIntercept((event) => {
+            const link = event.data.getRequestUrl();
+            if (link.startsWith('about:') || link.startsWith('data:') ||
+              link.startsWith('blob:') || link.startsWith('javascript:')) {
+              return false;
+            }
+            if (link.startsWith('http://') || link.startsWith('https://')) {
+              const allowed = hostAllowed(link);
+              if (!allowed && event.data.isMainFrame()) {
+                hilog.warn(DOMAIN, 'Index', 'blocked navigation: %{public}s', link);
+              }
+              return !allowed;
+            }
+            return true;
+          })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.theme.bg)
+    .bindSheet($$this.showSheet, this.ActiveSheet(), {
+      height: this.sheetKind === 2 ? 360 : (this.sheetKind === 3 ? 330 : 500),
+      backgroundColor: this.theme.card,
+      dragBar: true,
+      showClose: false,
+      onDisappear: () => {
+        this.loginPassword = '';
+        this.loginCaptcha = '';
+        this.sheetKind = 0;
+      }
+    })
+  }
+}

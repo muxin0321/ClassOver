@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "江汉大学校园助手入口模块",
+  "main": "",
+  "author": "muxin",
+  "license": "",
+  "dependencies": {}
+}

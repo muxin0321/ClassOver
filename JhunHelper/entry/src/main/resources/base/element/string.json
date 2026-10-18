@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "快点下课 · 江汉大学课表助手"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "快点下课 · 江汉大学课表助手"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "快点下课"
+    },
+    {
+      "name": "location_reason",
+      "value": "用于在校园地图中显示你的当前位置"
+    }
+  ]
+}

@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>江汉助手 · 配色方案预览</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 34px 18px 70px; background: #E9EBEF; color: #20242B;
+    font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header { max-width: 1500px; margin: 0 auto 26px; }
+  h1 { margin: 0 0 8px; font-size: 25px; letter-spacing: .01em; }
+  .lead { margin: 0; font-size: 13px; line-height: 1.7; color: #5B6270; max-width: 900px; }
+  .lead b { color: #20242B; }
+  .gallery {
+    display: flex; flex-wrap: wrap; gap: 30px 26px;
+    justify-content: center; align-items: flex-start; max-width: 1500px; margin: 0 auto;
+  }
+  .panel { width: 352px; }
+  .panel h2 { margin: 0 0 3px; font-size: 15px; font-weight: 600; }
+  .panel .note { margin: 0 0 10px; font-size: 11px; line-height: 1.6; color: #6B7280; min-height: 34px; }
+  .phone {
+    border-radius: 28px; padding: 16px 14px 0; overflow: hidden;
+    background: var(--bg); border: 1px solid rgba(17, 24, 39, .06);
+    box-shadow: 0 16px 36px rgba(17, 24, 39, .10);
+  }
+  .top { display: flex; align-items: flex-start; justify-content: space-between; }
+  .title { font-size: 21px; font-weight: 700; color: var(--ink); letter-spacing: .01em; }
+  .sub { margin-top: 2px; font-size: 10px; color: var(--muted); }
+  .sync {
+    width: 38px; height: 38px; border-radius: 19px; display: flex; align-items: center; justify-content: center;
+    background: var(--soft); color: var(--primary); font-size: 19px;
+  }
+  .status { display: flex; align-items: center; margin: 10px 0 8px; font-size: 10px; color: var(--muted); }
+  .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--primary); margin-right: 6px; }
+  .count { margin-left: auto; font-size: 9px; }
+  .week { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .arrow { width: 30px; text-align: center; color: var(--primary); font-size: 22px; line-height: 1; }
+  .wk { flex: 1; text-align: center; }
+  .wk b { display: block; font-size: 13px; color: var(--ink); font-weight: 600; }
+  .wk small { display: block; margin-top: 1px; font-size: 9px; color: var(--muted); }
+  .cal {
+    font-size: 10px; color: var(--primary); background: var(--soft);
+    border-radius: 12px; padding: 5px 10px; white-space: nowrap;
+  }
+  .dayhead { display: flex; align-items: center; height: 28px; font-size: 10px; color: var(--ink); }
+  .dayhead span { flex: 1; text-align: center; }
+  .dayhead .timecol { width: 38px; flex: none; font-size: 9px; color: var(--muted); }
+  .dayhead .today { color: var(--primary); font-weight: 700; }
+  .schedule { display: flex; }
+  .times { width: 38px; flex: none; }
+  .times div { height: 34px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .times b { font-size: 10px; color: var(--ink); font-weight: 600; }
+  .times small { font-size: 7px; color: var(--muted); margin-top: 1px; }
+  .grid {
+    flex: 1; display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: repeat(8, 34px);
+    background-image:
+      linear-gradient(to right, var(--line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--line) 1px, transparent 1px);
+    background-size: calc(100% / 7) 100%, 100% 34px;
+    background-position: -1px 0, 0 -1px;
+  }
+  .course {
+    margin: 2px; border-radius: 6px; padding: 4px 3px; overflow: hidden;
+    background: var(--cbg); color: var(--cfg); font-size: 9px; line-height: 1.25;
+    font-weight: 600; z-index: 1;
+  }
+  .course i { display: block; margin-top: 2px; font-style: normal; font-weight: 400; font-size: 7px; opacity: .8; }
+  .section { margin: 14px 0 8px; font-size: 12px; font-weight: 600; color: var(--ink); }
+  .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .q { background: var(--card); border-radius: 12px; padding: 9px; }
+  .qi {
+    width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .q b { display: block; margin-top: 7px; font-size: 11px; color: var(--ink); font-weight: 600; }
+  .q small { display: block; margin-top: 2px; font-size: 8px; color: var(--muted); }
+  .profile {
+    margin-top: 10px; background: var(--card); border-radius: 14px; padding: 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 19px; background: var(--primary); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700;
+  }
+  .profile b { display: block; font-size: 12px; color: var(--ink); }
+  .profile small { display: block; margin-top: 3px; font-size: 9px; color: var(--muted); }
+  .nav {
+    margin: 14px -14px 0; height: 50px; display: flex; background: var(--card);
+    border-top: 1px solid var(--line);
+  }
+  .nav span {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; font-size: 15px; color: var(--muted);
+  }
+  .nav small { font-size: 9px; }
+  .nav .on { color: var(--primary); }
+  .tokens { display: flex; align-items: center; gap: 5px; margin-top: 9px; flex-wrap: wrap; }
+  .tokens i { width: 15px; height: 15px; border-radius: 8px; border: 1px solid rgba(0,0,0,.06); }
+  .tokens em { font-style: normal; font-size: 10px; color: #6B7280; margin-left: 4px; }
+  .foot { max-width: 900px; margin: 34px auto 0; font-size: 12px; line-height: 1.8; color: #5B6270; }
+  .foot b { color: #20242B; }
+</style>
+</head>
+<body>
+<header>
+  <h1>江汉助手 · 配色方案预览</h1>
+  <p class="lead">
+    四套浅色方案 + 一套深色方案，与当前版本并排对比。课程卡片使用同一组明度与饱和度规则，
+    所有文字/底色对比度均 <b>≥ 5.7:1</b>；当前版本有一对只有 4.39:1（橙色那门），所以看起来会发脏。
+    快捷入口的底色也从四个互不相关的颜色改为同一色系内的深浅变化。
+  </p>
+</header>
+
+<div class="gallery" id="gallery"></div>
+
+<div class="foot">
+  <p><b>怎么选：</b>在浏览器里直接看，或把手机凑近屏幕对比。喜欢哪套告诉我字母（A/B/C/D/E），我再把它做成应用内的语义色 token。</p>
+  <p><b>关于深色：</b>E 是 A 的深色版本。HarmonyOS 应用应同时支持浅色和深色；确认主方案后，我会按同一色相生成对应的深色模式，而不是简单反色。</p>
+</div>
+
+<script>
+  const courseBase = [
+    { name: '高等数学', room: 'J01-A101', day: 1, start: 1, end: 2 },
+    { name: '大学英语', room: 'J02-B204', day: 1, start: 3, end: 4 },
+    { name: '大学物理', room: 'J03-C305', day: 2, start: 5, end: 6 },
+    { name: '线性代数', room: 'J01-A208', day: 3, start: 1, end: 2 },
+    { name: '程序设计', room: '实验楼 402', day: 4, start: 7, end: 8 },
+    { name: '体育', room: '北区操场', day: 5, start: 3, end: 4 },
+    { name: '中国近现代史', room: 'J04-D101', day: 3, start: 5, end: 6 },
+    { name: '大学化学', room: 'J02-B311', day: 4, start: 1, end: 2 }
+  ];
+
+  const themes = [
+    {
+      key: '当前',
+      name: '当前版本',
+      note: '课程色明度不统一，橙色对比度仅 4.39:1；背景偏蓝灰，层次偏弱。',
+      t: { bg: '#F5F7FB', card: '#FFFFFF', line: '#E8EBF2', ink: '#1A1D26', muted: '#7A8194', primary: '#2F6BFF', deep: '#1F56E0', soft: '#EAF1FF' },
+      c: [
+        ['#E8F1FF', '#2F5DB3'], ['#E7F7EF', '#1F7A53'], ['#FFF1E6', '#A85F1E'], ['#F3ECFF', '#6B3FA0'],
+        ['#FFECF0', '#A63B55'], ['#E9F7F9', '#1F6F78'], ['#F7F3E6', '#7A6320'], ['#EDEFF5', '#46506B']
+      ]
+    },
+    {
+      key: 'A',
+      name: 'A · 学院蓝',
+      note: '最接近现在的气质，但换成更沉的书卷蓝与中性纸白底；课程色统一为柔和莫兰迪。',
+      t: { bg: '#F7F8FA', card: '#FFFFFF', line: '#E7EAEF', ink: '#1B1F26', muted: '#6F7683', primary: '#2C5F9E', deep: '#234C80', soft: '#EAF1FA' },
+      c: [
+        ['#EAF1FA', '#2B4F7D'], ['#E6F4F3', '#1F5B58'], ['#EAF4EA', '#2F6236'], ['#FBF1E2', '#7A5217'],
+        ['#FAECEF', '#8A3B4A'], ['#F1EDF9', '#594287'], ['#EDF0F4', '#445064'], ['#F7F1E6', '#6E5A2E']
+      ]
+    },
+    {
+      key: 'B',
+      name: 'B · 三角湖青',
+      note: '取自三角湖的水色，冷静、清新；绿色按钮在校园应用里不常见，辨识度最高。',
+      t: { bg: '#F5F9F8', card: '#FFFFFF', line: '#E2EBE8', ink: '#17211F', muted: '#6C7B77', primary: '#16706B', deep: '#115A56', soft: '#E3F2F0' },
+      c: [
+        ['#E3F3F1', '#155F5A'], ['#E9F1F9', '#2A527C'], ['#EDF3E7', '#4A6330'], ['#F8EEE7', '#7C4A2A'],
+        ['#F6EDF4', '#6E3D63'], ['#EBF0F2', '#3F545C'], ['#F9F2DF', '#6F5A1C'], ['#EAF1F4', '#35606E']
+      ]
+    },
+    {
+      key: 'C',
+      name: 'C · 松墨',
+      note: '松绿 + 米纸底，像纸质课表；最安静的一套，长时间看最不累。',
+      t: { bg: '#F8F7F2', card: '#FFFFFF', line: '#E9E4D9', ink: '#22231D', muted: '#757568', primary: '#2F5D3A', deep: '#264A2F', soft: '#E9F1EA' },
+      c: [
+        ['#E9F1EA', '#2C5A38'], ['#EFF3E4', '#55642A'], ['#F7EDE4', '#7A4B2B'], ['#E9F0F7', '#2F5277'],
+        ['#F8EBEE', '#85404D'], ['#F8F1DF', '#6F571D'], ['#EFF0EC', '#4E5547'], ['#E7F2F1', '#21605C']
+      ]
+    },
+    {
+      key: 'D',
+      name: 'D · 暮紫',
+      note: '低饱和紫灰，夜间和室内灯光下最耐看；比蓝色更有个人气质。',
+      t: { bg: '#F8F7FB', card: '#FFFFFF', line: '#E8E6EF', ink: '#1E1B26', muted: '#74707F', primary: '#6B5AA6', deep: '#574791', soft: '#EFECF9' },
+      c: [
+        ['#EFECF9', '#51418A'], ['#E9F0FA', '#2C4F7C'], ['#F9ECF1', '#83434F'], ['#E6F2F1', '#1F5E59'],
+        ['#F1F2E2', '#5A5F26'], ['#FAF0E1', '#74531C'], ['#ECEFF5', '#414B60'], ['#F4ECF6', '#6A406F']
+      ]
+    },
+    {
+      key: 'E',
+      name: 'E · 夜幕（深色）',
+      note: '学院蓝的深色版本：背景不是纯黑，课程卡用低亮度同色相，避免刺眼。',
+      t: { bg: '#0F1216', card: '#1A1E24', line: '#2A3038', ink: '#ECEEF2', muted: '#9AA2AE', primary: '#7FA8E8', deep: '#A8C4F0', soft: '#1D2836' },
+      c: [
+        ['#1E2A3A', '#B9D2F5'], ['#17302B', '#8FD3C2'], ['#332A1B', '#E0BE83'], ['#2A2138', '#C3ADE8'],
+        ['#34202A', '#E8A9BC'], ['#1B2C31', '#8FCFD6'], ['#302C1E', '#D6C98A'], ['#232830', '#AEB9CC']
+      ]
+    }
+  ];
+
+  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const today = 4;
+  const navItems = [['▦', '课表'], ['⊞', '常用'], ['◉', '我的']];
+
+  function courseCells(palette) {
+    return courseBase.map((course, i) => {
+      const pair = palette.c[i % palette.c.length];
+      const area = `${course.start} / ${course.day} / ${course.end + 1} / ${course.day + 1}`;
+      return `<div class="course" style="grid-area:${area};--cbg:${pair[0]};--cfg:${pair[1]}">${course.name}<i>${course.room}</i></div>`;
+    }).join('');
+  }
+
+  function times() {
+    const starts = ['08:20', '09:15', '10:20', '11:15', '14:00', '14:50', '15:55', '16:45'];
+    return starts.map((s, i) => `<div><b>${i + 1}</b><small>${s}</small></div>`).join('');
+  }
+
+  function quickLinks(theme) {
+    const items = [
+      ['⚡', '电费查询', '电量查询 · 在线缴费'],
+      ['🧪', '大物实验报告', '需连接校园网'],
+      ['🗺️', '校园地图', '探索校园'],
+      ['🛠️', '网上报修', '校园后勤服务']
+    ];
+    const tints = [theme.c[0][0], theme.c[1][0], theme.c[3][0], theme.c[4][0]];
+    return items.map(([symbol, title, sub], i) => {
+      return `<div class="q"><div class="qi" style="background:${tints[i]}">${symbol}</div><b>${title}</b><small>${sub}</small></div>`;
+    }).join('');
+  }
+
+  function render(theme) {
+    const t = theme.t;
+    const style = `--bg:${t.bg};--card:${t.card};--line:${t.line};--ink:${t.ink};--muted:${t.muted};--primary:${t.primary};--deep:${t.deep};--soft:${t.soft}`;
+    const swatches = theme.c.map((pair) => `<i style="background:${pair[0]};border-color:${pair[1]}33"></i>`).join('');
+    return `<section class="panel">
+      <h2>${theme.name}</h2>
+      <p class="note">${theme.note}</p>
+      <div class="phone" style="${style}">
+        <div class="top">
+          <div><div class="title">江汉课表</div><div class="sub">2026-2027学年第一学期</div></div>
+          <div class="sync">⟳</div>
+        </div>
+        <div class="status"><span class="dot"></span>本地课表 · 上次更新 10-17 21:10<span class="count">本周 6 门</span></div>
+        <div class="week"><span class="arrow">‹</span><div class="wk"><b>第 8 周</b><small>共 20 教学周</small></div><span class="arrow">›</span><span class="cal">校准</span></div>
+        <div class="dayhead"><span class="timecol">节次</span>${days.map((d, i) => `<span class="${i + 1 === today ? 'today' : ''}">${d}</span>`).join('')}</div>
+        <div class="schedule"><div class="times">${times()}</div><div class="grid">${courseCells(theme)}</div></div>
+        <div class="section">常用入口</div>
+        <div class="quick">${quickLinks(theme)}</div>
+        <div class="profile"><div class="avatar">江</div><div><b>已登录教务系统</b><small>教务账号 2023****01</small></div></div>
+        <div class="nav">${navItems.map(([s, l], i) => `<span class="${i === 0 ? 'on' : ''}">${s}<small>${l}</small></span>`).join('')}</div>
+      </div>
+      <div class="tokens">
+        <i style="background:${t.primary}"></i><i style="background:${t.bg}"></i><i style="background:${t.line}"></i><i style="background:${t.soft}"></i>
+        ${swatches}
+        <em>主色 ${t.primary} · 背景 ${t.bg}</em>
+      </div>
+    </section>`;
+  }
+
+  document.getElementById('gallery').innerHTML = themes.map(render).join('');
+</script>
+</body>
+</html>

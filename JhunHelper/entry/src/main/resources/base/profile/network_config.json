@@ -1,0 +1,31 @@
+{
+  "network-security-config": {
+    "base-config": {
+      "cleartextTrafficPermitted": false
+    },
+    "component-config": {
+      "Request": true,
+      "Network Kit": true,
+      "ArkWeb": true
+    },
+    "domain-config": [
+      {
+        "cleartextTrafficPermitted": true,
+        "domains": [
+          {
+            "include-subdomains": false,
+            "name": "ehall.jhun.edu.cn"
+          },
+          {
+            "include-subdomains": false,
+            "name": "hqfw.jhun.edu.cn"
+          },
+          {
+            "include-subdomains": false,
+            "name": "wlxpk.jhun.edu.cn"
+          }
+        ]
+      }
+    ]
+  }
+}
