@@ -113,6 +113,13 @@ export class JwxtWeb {
       var cap = document.getElementById('randnumber');
       var alt = document.getElementById('randnumber1');
       var pic = document.getElementById('randpic');
+      // 隐藏 Web 只用于自动登录，不应触发系统密码保险箱。
+      // 改成普通文本框并关闭自动填充，避免提交时被识别为可保存的登录表单。
+      if (user) user.setAttribute('autocomplete', 'off');
+      if (pass) {
+        pass.setAttribute('autocomplete', 'off');
+        pass.setAttribute('type', 'text');
+      }
       // 学校开启验证码（yzmbt=1）时只启用 #randnumber1，
       // 真实输入框 #randnumber 与图片 #randpic 要等 refreshImg 后才显示。
       var altRequired = !!alt && !alt.disabled &&
@@ -156,6 +163,11 @@ export class JwxtWeb {
       var pass = document.getElementById('password');
       var button = document.getElementById('login');
       if (!user || !pass || !button) return {state:'form-missing'};
+      var form = user.form || pass.form;
+      if (form) form.setAttribute('autocomplete', 'off');
+      user.setAttribute('autocomplete', 'off');
+      pass.setAttribute('autocomplete', 'off');
+      pass.setAttribute('type', 'text');
       function fill(el, value) {
         el.value = value;
         el.dispatchEvent(new Event('input', {bubbles:true}));

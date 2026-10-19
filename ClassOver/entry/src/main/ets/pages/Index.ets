@@ -456,8 +456,9 @@ struct Index {
         const schedule = outcome.schedule;
         this.schedule = schedule;
         this.selectedTerm = schedule.term;
-        this.currentWeek = Math.min(Math.max(1, this.currentWeek), Math.max(1, schedule.maxWeek));
-        this.calibrationWeek = this.currentWeek;
+        const maxWeek = Math.max(1, schedule.maxWeek);
+        this.currentWeek = Math.min(Math.max(1, this.currentWeek), maxWeek);
+        this.calibrationWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
         this.loggedIn = true;
         if (this.store !== null) {
           this.store.save(schedule);
@@ -732,9 +733,14 @@ struct Index {
     if (next < 1 || next > this.schedule.maxWeek) {
       return;
     }
+    // 只切换当前浏览的周，不改变“真实本周”的校准值。
     this.currentWeek = next;
-    this.calibrationWeek = next;
     this.rebuildLayout();
+  }
+
+  /** 只有浏览的周正好是校准出来的本周时，才高亮今天。 */
+  private isTodayColumn(day: number): boolean {
+    return this.currentWeek === this.calibrationWeek && this.todayDay === day;
   }
 
   private setCurrentWeek(): void {
@@ -895,7 +901,6 @@ struct Index {
             this.toast('请先同步课表');
             return;
           }
-          this.calibrationWeek = this.currentWeek;
           this.openSheet(3);
         })
     }
@@ -919,9 +924,9 @@ struct Index {
         Column() {
           Text(`周${label}`)
             .fontSize(12)
-            .fontWeight(this.todayDay === index + 1 ? FontWeight.Bold : FontWeight.Normal)
-            .fontColor(this.todayDay === index + 1 ? this.theme.primary : this.theme.ink)
-          if (this.todayDay === index + 1) {
+            .fontWeight(this.isTodayColumn(index + 1) ? FontWeight.Bold : FontWeight.Normal)
+            .fontColor(this.isTodayColumn(index + 1) ? this.theme.primary : this.theme.ink)
+          if (this.isTodayColumn(index + 1)) {
             Circle()
               .width(4)
               .height(4)
@@ -996,7 +1001,7 @@ struct Index {
             Column()
               .layoutWeight(1)
               .height(CELL_H)
-              .backgroundColor(this.todayDay === dayIndex + 1 ? tint(this.theme.primary, '0A') : Color.Transparent)
+              .backgroundColor(this.isTodayColumn(dayIndex + 1) ? tint(this.theme.primary, '0A') : Color.Transparent)
               .border({ width: { right: 0.5, bottom: 0.5 }, color: this.theme.line })
           }, (label: string) => `${label}-${rowIndex}`)
         }
@@ -1539,6 +1544,7 @@ struct Index {
       TextInput({ placeholder: '账号 / 学号', text: this.loginAccount })
         .height(46)
         .borderRadius(12)
+        .enableAutoFill(false)
         .fontColor(this.theme.ink)
         .placeholderColor(this.theme.muted)
         .backgroundColor(this.theme.bg)
@@ -1551,6 +1557,7 @@ struct Index {
         .type(InputType.Password)
         .height(46)
         .borderRadius(12)
+        .enableAutoFill(false)
         .fontColor(this.theme.ink)
         .placeholderColor(this.theme.muted)
         .backgroundColor(this.theme.bg)
@@ -1565,6 +1572,7 @@ struct Index {
           TextInput({ placeholder: '验证码', text: this.loginCaptcha })
             .height(46)
             .borderRadius(12)
+            .enableAutoFill(false)
             .fontColor(this.theme.ink)
             .placeholderColor(this.theme.muted)
             .backgroundColor(this.theme.bg)
