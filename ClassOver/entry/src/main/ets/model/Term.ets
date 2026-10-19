@@ -76,3 +76,26 @@ export function labelFromKey(key: string): string {
   }
   return new TermInfo(year, half).label;
 }
+
+/**
+ * 根据校历的学期开始日期计算当前教学周。
+ * startDate 格式 YYYY-MM-DD；开学当天算第 1 周。
+ * 返回 0 表示日期无效或尚未开学；超过 maxWeek 时按 maxWeek 处理。
+ */
+export function weekOfTerm(startDate: string, maxWeek: number, now: Date = new Date()): number {
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(startDate);
+  if (!match) {
+    return 0;
+  }
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.floor((today.getTime() - start.getTime()) / 86400000);
+  if (days < 0) {
+    return 0;
+  }
+  const week = Math.floor(days / 7) + 1;
+  if (maxWeek > 0 && week > maxWeek) {
+    return maxWeek;
+  }
+  return week;
+}

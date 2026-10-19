@@ -5,6 +5,7 @@ import { url } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Course } from '../model/Course';
 import { DEFAULT_ENDS, DEFAULT_STARTS, Schedule } from '../model/Schedule';
+import { weekOfTerm } from '../model/Term';
 import { AppPrefs } from '../store/AppPrefs';
 import { AcademicStore } from '../store/AcademicStore';
 import { CredentialStore } from '../store/CredentialStore';
@@ -145,6 +146,8 @@ struct Index {
   @State theme: ThemePalette = themeFor('D', false);
   @State themeId: string = 'D';
   @State colorMode: string = 'auto'; // auto | light | dark
+  @State weekOverrideTerm: string = '';
+  @State autoWeekValue: number = 0;
 
   @State showSheet: boolean = false;
   @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准
@@ -169,6 +172,7 @@ struct Index {
   private prefsReady: boolean = false;
   private autoSyncStarted: boolean = false;
   private loginWebOpened: boolean = false;
+  private autoWeekRefreshing: boolean = false;
 
   private links: QuickLink[] = [
     new QuickLink('电费查询', '电量查询 · 在线缴费', $r('sys.symbol.bolt_1'), ELECTRICITY_URL, 'electricity', true),
@@ -230,6 +234,7 @@ struct Index {
       this.currentWeek = AppPrefs.getNumber('currentWeek', 1);
       this.themeId = AppPrefs.getString('themeId', 'D');
       this.colorMode = AppPrefs.getString('colorMode', 'auto');
+      this.weekOverrideTerm = AppPrefs.getString('weekOverrideTerm', '');
     } catch (err) {
       this.debugNote = '读取设置失败';
     }
@@ -271,16 +276,67 @@ struct Index {
     this.prefsReady = true;
     hilog.info(DOMAIN, 'Index', 'init done: webCapable=%{public}s webReady=%{public}s scripts=%{public}s',
       `${this.webCapable}`, `${this.webReady}`, `${this.scriptLoaded}`);
+    this.refreshAutoWeek();
     this.maybeAutoSync();
   }
 
-  private maybeAutoSync(): void {
+  private async maybeAutoSync(): Promise<void> {
     if (this.autoSyncStarted || !this.prefsReady || !this.webReady) {
       return;
     }
     this.autoSyncStarted = true;
     if (this.autoLogin) {
-      this.syncNow(true);
+      await this.syncNow(true);
+    }
+    await this.refreshAutoWeek();
+  }
+
+  /**
+   * 优先用缓存里的校历开始日期计算周次；没有缓存时再从学校公开校历读取。
+   * 手动校准过的学期不覆盖用户设置，但仍记录自动周次供校准面板展示。
+   */
+  private async refreshAutoWeek(): Promise<void> {
+    if (this.autoWeekRefreshing) {
+      return;
+    }
+    const schedule = this.schedule;
+    if (schedule === null) {
+      return;
+    }
+    this.autoWeekRefreshing = true;
+    try {
+      let start = schedule.startDate;
+      if (!start && this.jwxt !== null && this.webReady) {
+        start = await this.jwxt.fetchTermStart(schedule.term);
+        if (start) {
+          schedule.startDate = start;
+          this.schedule = schedule;
+          if (this.store !== null) {
+            this.store.save(schedule);
+          }
+        }
+      }
+      if (!start) {
+        this.autoWeekValue = 0;
+        return;
+      }
+      const autoWeek = weekOfTerm(start, schedule.maxWeek);
+      if (autoWeek <= 0) {
+        return;
+      }
+      this.autoWeekValue = autoWeek;
+      if (this.weekOverrideTerm === schedule.term) {
+        return;
+      }
+      const wasOnCurrent = this.currentWeek === this.calibrationWeek;
+      this.calibrationWeek = autoWeek;
+      if (wasOnCurrent) {
+        this.currentWeek = autoWeek;
+      }
+      AppPrefs.setNumber('currentWeek', autoWeek);
+      this.rebuildLayout();
+    } finally {
+      this.autoWeekRefreshing = false;
     }
   }
 
@@ -454,6 +510,9 @@ struct Index {
       this.syncing = false;
       if (outcome.ok && outcome.schedule !== null) {
         const schedule = outcome.schedule;
+        if (this.schedule !== null && this.schedule.term === schedule.term && !schedule.startDate) {
+          schedule.startDate = this.schedule.startDate;
+        }
         this.schedule = schedule;
         this.selectedTerm = schedule.term;
         const maxWeek = Math.max(1, schedule.maxWeek);
@@ -466,6 +525,7 @@ struct Index {
         await AppPrefs.setString('selectedTerm', schedule.term);
         this.status = `本地课表 · 更新于 ${formatStamp(schedule.savedAt)}`;
         this.rebuildLayout();
+        this.refreshAutoWeek();
         this.toast('课表已更新');
         return;
       }
@@ -744,11 +804,26 @@ struct Index {
   }
 
   private setCurrentWeek(): void {
+    this.weekOverrideTerm = this.schedule !== null ? this.schedule.term : '';
+    AppPrefs.setString('weekOverrideTerm', this.weekOverrideTerm);
     this.currentWeek = this.calibrationWeek;
     AppPrefs.setNumber('currentWeek', this.calibrationWeek);
     this.closeSheet();
     this.rebuildLayout();
-    this.toast(`已将第 ${this.calibrationWeek} 周设为本周`);
+    this.toast(`已将第 ${this.calibrationWeek} 周设为本周 · 手动校准`);
+  }
+
+  private async restoreAutoWeek(): Promise<void> {
+    this.weekOverrideTerm = '';
+    await AppPrefs.setString('weekOverrideTerm', '');
+    await this.refreshAutoWeek();
+    if (this.autoWeekValue > 0) {
+      this.currentWeek = this.autoWeekValue;
+      this.rebuildLayout();
+      this.toast(`已恢复自动计算：第 ${this.autoWeekValue} 周`);
+    } else {
+      this.toast('暂时无法读取校历，请手动校准');
+    }
   }
 
   private weekCourseCount(): number {
@@ -1748,11 +1823,30 @@ struct Index {
         .fontSize(19)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.theme.ink)
-      Text('学校课表只提供周次，不提供开学日期。请选择你当前实际所在的周。')
+      Text('优先按学校校历自动计算；如校历与实际不符，可手动调整。')
         .fontSize(11)
         .fontColor(this.theme.muted)
         .margin({ top: 6 })
         .width('100%')
+
+      Text(this.autoWeekValue > 0
+        ? `按校历自动计算：第 ${this.autoWeekValue} 周`
+        : '尚未读取校历，可手动设置')
+        .fontSize(10)
+        .fontColor(this.autoWeekValue > 0 ? this.theme.ok : this.theme.faint)
+        .margin({ top: 6 })
+        .width('100%')
+
+      if (this.weekOverrideTerm !== '' && this.weekOverrideTerm === (this.schedule?.term ?? '')) {
+        Text('当前为手动校准 · 点此恢复自动计算')
+          .fontSize(11)
+          .fontColor(this.theme.primary)
+          .margin({ top: 6 })
+          .width('100%')
+          .onClick(() => {
+            this.restoreAutoWeek();
+          })
+      }
 
       Text(`第 ${this.calibrationWeek} 周`)
         .fontSize(30)
@@ -1880,7 +1974,7 @@ struct Index {
     .height('100%')
     .backgroundColor(this.theme.bg)
     .bindSheet($$this.showSheet, this.ActiveSheet(), {
-      height: this.sheetKind === 2 ? 360 : (this.sheetKind === 3 ? 330 : 500),
+      height: this.sheetKind === 2 ? 360 : (this.sheetKind === 3 ? 390 : 500),
       backgroundColor: this.theme.card,
       dragBar: true,
       showClose: false,

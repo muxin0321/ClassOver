@@ -12,6 +12,8 @@ export interface ScheduleJson {
   maxWeek: number;
   savedAt?: number;
   source?: string;
+  /** 校历里的学期开始日期，格式 YYYY-MM-DD */
+  startDate?: string;
   courses: CourseJson[];
   /** version 1 的旧格式 */
   rows?: LegacyScheduleRow[];
@@ -34,6 +36,7 @@ export class Schedule {
   term: string = '';
   maxWeek: number = 20;
   savedAt: number = 0;
+  startDate: string = '';
   courses: Course[] = [];
 
   static fromJson(obj: ScheduleJson): Schedule {
@@ -50,6 +53,7 @@ export class Schedule {
     schedule.term = obj.term;
     schedule.maxWeek = obj.maxWeek;
     schedule.savedAt = obj.savedAt ?? 0;
+    schedule.startDate = obj.startDate ?? '';
 
     if (obj.version === 2) {
       if (!Array.isArray(obj.courses)) {
@@ -132,6 +136,7 @@ export class Schedule {
       term: this.term,
       maxWeek: this.maxWeek,
       savedAt: this.savedAt,
+      startDate: this.startDate,
       source: 'school-sync',
       courses: courses
     };

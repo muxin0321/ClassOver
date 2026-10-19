@@ -1,6 +1,7 @@
 import { webview } from '@kit.ArkWeb';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Schedule, ScheduleJson } from '../model/Schedule';
+import { parseTerm } from '../model/Term';
 import { Scripts, quote } from './Scripts';
 
 const DOMAIN = 0x0001;
@@ -31,6 +32,8 @@ export interface WebResult {
   pass?: boolean;
   button?: boolean;
   home?: boolean;
+  start?: string;
+  token?: string;
 }
 
 export interface LoginCheck {
@@ -257,6 +260,76 @@ export class JwxtWeb {
     };
     this.logProbe(check, result);
     return check;
+  }
+
+  /**
+   * 从学校公开校历读取学期开始日期（YYYY-MM-DD）。
+   * 校历页是 GBK 编码，用 WebView 里的 TextDecoder 解码。
+   */
+  async fetchTermStart(term: string): Promise<string> {
+    const info = parseTerm(term);
+    if (info === null) {
+      return '';
+    }
+    const url = this.currentUrl();
+    if (!url.startsWith('https://jwxt.jhun.edu.cn')) {
+      return '';
+    }
+    const token = Date.now().toString();
+    const half = info.half - 1;
+    const startScript = `JSON.stringify((function(year, half, token){
+      window.__jhunCalToken = String(token);
+      window.__jhunCalStart = '';
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'https://jwxt.jhun.edu.cn/public/SchoolCalendar.show.jsp?xn=' + year + '&xq_m=' + half, true);
+        xhr.responseType = 'arraybuffer';
+        xhr.onload = function(){
+          try {
+            var text = new TextDecoder('gbk').decode(new Uint8Array(xhr.response));
+            var title = text.match(/江汉大学\\s*(\\d{4})-(\\d{4})\\s*学年\\s*(第[一二]学期)\\s*校历/);
+            if (!title || Number(title[1]) !== year ||
+              (half === 0 ? title[3] !== '第一学期' : title[3] !== '第二学期')) {
+              window.__jhunCalStart = 'NOTFOUND';
+              return;
+            }
+            var m = text.match(/学期开始日期[：:]\\s*(\\d{4})-(\\d{1,2})-(\\d{1,2})/);
+            if (m) {
+              window.__jhunCalStart = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+            } else {
+              window.__jhunCalStart = 'NOTFOUND';
+            }
+          } catch (e) {
+            window.__jhunCalStart = 'ERROR';
+          }
+        };
+        xhr.onerror = function(){ window.__jhunCalStart = 'ERROR'; };
+        xhr.send();
+      } catch (e) {
+        window.__jhunCalStart = 'ERROR';
+      }
+      return JSON.stringify({token: String(token)});
+    })(${info.year}, ${half}, ${quote(token)}))`;
+    const started = await this.evalJson(startScript);
+    if (started === null) {
+      return '';
+    }
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await sleep(250);
+      const result = await this.evalJson(
+        `JSON.stringify({token: window.__jhunCalToken || '', start: window.__jhunCalStart || ''})`);
+      if (result === null || result.token !== token || !result.start) {
+        continue;
+      }
+      if (result.start === 'ERROR' || result.start === 'NOTFOUND') {
+        return '';
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(result.start)) {
+        return result.start;
+      }
+    }
+    return '';
   }
 
   /**
