@@ -5,7 +5,8 @@ import { url } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Course } from '../model/Course';
 import { DEFAULT_ENDS, DEFAULT_STARTS, Schedule } from '../model/Schedule';
-import { weekOfTerm } from '../model/Term';
+import { weekOfTerm, parseTerm } from '../model/Term';
+import { ClassSlot, DayStatus, NextClassBar } from '../components/NextClassBar';
 import { AppPrefs } from '../store/AppPrefs';
 import { AcademicStore } from '../store/AcademicStore';
 import { CredentialStore } from '../store/CredentialStore';
@@ -118,6 +119,37 @@ function formatStamp(timestamp: number): string {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
+/** 课表缓存的新鲜窗口：24 小时内同步过，启动时先展示缓存并静默更新。 */
+const CACHE_FRESH_MS = 24 * 60 * 60 * 1000;
+
+/** "2026-2027学年第1学期" → "2026-2027 · 第1学期"；识别失败时原样返回。 */
+function shortTermLabel(text: string): string {
+  const info = parseTerm(text);
+  if (info === null) {
+    return text;
+  }
+  return `${info.year}-${info.year + 1} · 第${info.half}学期`;
+}
+
+/** 当前学年起始年份：9 月及以后算新学年。 */
+function currentAcademicStartYear(): number {
+  const now = new Date();
+  return now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;
+}
+
+/** 只保留最近四个学年的学期，更早的对在校生没有意义。 */
+function recentTerms(terms: string[]): string[] {
+  const minYear = currentAcademicStartYear() - 3;
+  const result: string[] = [];
+  for (let i = 0; i < terms.length; i++) {
+    const info = parseTerm(terms[i]);
+    if (info !== null && info.year >= minYear && result.indexOf(terms[i]) < 0) {
+      result.push(terms[i]);
+    }
+  }
+  return result;
+}
+
 @Entry
 @Component
 struct Index {
@@ -148,6 +180,9 @@ struct Index {
   @State colorMode: string = 'auto'; // auto | light | dark
   @State weekOverrideTerm: string = '';
   @State autoWeekValue: number = 0;
+  @State statusJson: string = '';
+  @State sheetWeek: number = 1;
+  @State availableTerms: string[] = [];
 
   @State showSheet: boolean = false;
   @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准
@@ -173,6 +208,12 @@ struct Index {
   private autoSyncStarted: boolean = false;
   private loginWebOpened: boolean = false;
   private autoWeekRefreshing: boolean = false;
+  private silentSyncBusy: boolean = false;
+  private silentSyncTimer: number = -1;
+  private silentSyncOk: boolean = false;
+  private silentFailReason: string = '';
+  private silentAwaitToast: boolean = false;
+  private pendingTermSync: string = '';
 
   private links: QuickLink[] = [
     new QuickLink('电费查询', '电量查询 · 在线缴费', $r('sys.symbol.bolt_1'), ELECTRICITY_URL, 'electricity', true),
@@ -190,10 +231,18 @@ struct Index {
   onPageShow(): void {
     const today = new Date().getDay();
     this.todayDay = today === 0 ? 7 : today;
+    this.updateTodayStatus();
     this.applySystemBars();
     if (this.loginWebOpened) {
       this.loginWebOpened = false;
       this.syncNow(false);
+    }
+  }
+
+  aboutToDisappear(): void {
+    if (this.silentSyncTimer !== -1) {
+      clearTimeout(this.silentSyncTimer);
+      this.silentSyncTimer = -1;
     }
   }
 
@@ -235,6 +284,13 @@ struct Index {
       this.themeId = AppPrefs.getString('themeId', 'D');
       this.colorMode = AppPrefs.getString('colorMode', 'auto');
       this.weekOverrideTerm = AppPrefs.getString('weekOverrideTerm', '');
+      const termsRaw = AppPrefs.getString('availableTerms', '');
+      if (termsRaw !== '') {
+        const parsed = JSON.parse(termsRaw) as string[];
+        if (Array.isArray(parsed)) {
+          this.availableTerms = recentTerms(parsed);
+        }
+      }
     } catch (err) {
       this.debugNote = '读取设置失败';
     }
@@ -266,6 +322,7 @@ struct Index {
         this.status = cached.savedAt ? `本地课表 · 上次更新 ${formatStamp(cached.savedAt)}` : '本地课表';
         this.loggedIn = this.hasCredential;
         this.rebuildLayout();
+        this.updateTodayStatus();
       } else if (!this.hasCredential) {
         this.status = '请先登录教务系统，获取你自己的课表';
       }
@@ -276,6 +333,7 @@ struct Index {
     this.prefsReady = true;
     hilog.info(DOMAIN, 'Index', 'init done: webCapable=%{public}s webReady=%{public}s scripts=%{public}s',
       `${this.webCapable}`, `${this.webReady}`, `${this.scriptLoaded}`);
+    this.updateTodayStatus();
     this.refreshAutoWeek();
     this.maybeAutoSync();
   }
@@ -286,9 +344,30 @@ struct Index {
     }
     this.autoSyncStarted = true;
     if (this.autoLogin) {
-      await this.syncNow(true);
+      if (this.isCacheFresh()) {
+        // 24 小时内同步过：先让本地课表直接可用，等界面稳定后再静默更新。
+        hilog.info(DOMAIN, 'Index', 'cache fresh, start silent sync');
+        this.silentSyncTimer = setTimeout(() => {
+          this.silentSyncTimer = -1;
+          this.syncNow(true, true);
+        }, 2000);
+      } else {
+        await this.syncNow(true);
+      }
     }
     await this.refreshAutoWeek();
+  }
+
+  /**
+   * 缓存是否足够新。设备时间被改动时 savedAt 可能在未来，
+   * 按用户要求不做特殊处理，直接按时间戳原值比较（负的间隔视为新）。
+   */
+  private isCacheFresh(): boolean {
+    const schedule = this.schedule;
+    if (schedule === null || !schedule.savedAt) {
+      return false;
+    }
+    return Date.now() - schedule.savedAt < CACHE_FRESH_MS;
   }
 
   /**
@@ -335,6 +414,7 @@ struct Index {
       }
       AppPrefs.setNumber('currentWeek', autoWeek);
       this.rebuildLayout();
+      this.updateTodayStatus();
     } finally {
       this.autoWeekRefreshing = false;
     }
@@ -428,62 +508,114 @@ struct Index {
 
   private openSheet(kind: number): void {
     this.sheetKind = kind;
-    this.showSheet = true;
+    if (!this.showSheet) {
+      this.showSheet = true;
+    }
   }
 
   private closeSheet(): void {
     this.showSheet = false;
   }
 
-  private async syncNow(auto: boolean): Promise<void> {
-    if (this.syncing) {
+  private async syncNow(auto: boolean, silent: boolean = false): Promise<void> {
+    if (this.syncing || this.silentSyncBusy) {
+      if (!silent && this.silentSyncBusy) {
+        // 用户主动点了同步，但后台任务正在跑：记下来，结束后补一条结果提示。
+        this.silentAwaitToast = true;
+        this.toast('正在更新课表，请稍候');
+      }
       return;
     }
     if (!this.webCapable) {
+      if (silent) {
+        return;
+      }
       this.status = '当前环境不支持 Web 组件，请使用模拟器或真机';
       this.toast('当前环境不支持 Web 组件');
       return;
     }
     if (!this.scriptLoaded) {
+      if (silent) {
+        return;
+      }
       this.status = '注入脚本加载失败';
       this.toast('注入脚本加载失败');
       return;
     }
     if (!this.webReady || this.jwxt === null) {
+      if (silent) {
+        return;
+      }
       this.status = '教务浏览器正在连接，请稍后再试';
       this.toast('教务浏览器正在连接，请稍后再试');
       return;
     }
-    this.syncing = true;
-    this.status = auto ? '正在自动登录…' : '正在检查登录状态…';
+    if (silent) {
+      this.silentSyncBusy = true;
+      this.silentSyncOk = false;
+      this.silentFailReason = '';
+    } else {
+      this.syncing = true;
+      this.status = auto ? '正在自动登录…' : '正在检查登录状态…';
+    }
+    const generation = this.jwxt.generation();
 
     try {
       const check = await this.jwxt.checkSession();
+      if (check.state === 'cancelled') {
+        return;
+      }
       if (check.state === 'success') {
-        await this.doSync();
+        await this.doSync(silent);
         return;
       }
       if (check.state === 'ready') {
-        let latest: LoginCheck = check;
-        if (!check.captcha && this.autoLogin) {
+        // 此时隐藏 Web 已经停在登录页，先拿到它的会话 Cookie，
+        // 再预取并改写登录页（密码框初始就是 text），最后重新加载。
+        await this.jwxt.prefetchLoginPage();
+        if (this.jwxt.generation() !== generation) {
+          return;
+        }
+        const refreshed = await this.jwxt.prepareLogin();
+        if (refreshed.state === 'cancelled') {
+          return;
+        }
+        if (refreshed.state === 'success') {
+          this.pendingSync = false;
+          await this.doSync(silent);
+          return;
+        }
+        let latest: LoginCheck = refreshed.state === 'ready' ? refreshed : check;
+        if (!latest.captcha && this.autoLogin) {
           const credentials = await CredentialStore.load();
           if (credentials) {
-            this.status = '正在登录教务系统…';
+            if (!silent) {
+              this.status = '正在登录教务系统…';
+            }
             const loginResult = await this.jwxt.submitLogin(credentials.account, credentials.password, '');
+            if (loginResult.state === 'cancelled') {
+              return;
+            }
             if (loginResult.state === 'success') {
               this.pendingSync = false;
-              await this.doSync();
+              await this.doSync(silent);
               return;
             }
             // 提交失败时学校会重载登录页并换一张验证码。
             // 必须使用这次提交后探测到的状态，否则面板里是过期图片。
             latest = {
               state: 'ready',
-              captcha: loginResult.captcha || check.captcha,
-              image: loginResult.image || check.image,
-              message: loginResult.message || check.message
+              captcha: loginResult.captcha || latest.captcha,
+              image: loginResult.image || latest.image,
+              message: loginResult.message || latest.message
             };
           }
+        }
+        if (silent) {
+          // 后台同步遇到验证码或登录失败时不打扰用户，保留本地课表。
+          hilog.info(DOMAIN, 'Index', 'silent sync needs login, keep cache');
+          this.silentFailReason = '需要重新登录，请手动同步';
+          return;
         }
         this.syncing = false;
         this.pendingSync = true;
@@ -491,30 +623,80 @@ struct Index {
         this.openLoginSheet(latest);
         return;
       }
-      this.syncing = false;
-      this.status = check.message || '无法连接教务系统';
+      if (!silent) {
+        this.status = check.message || '无法连接教务系统';
+      } else {
+        this.silentFailReason = check.message || '无法连接教务系统';
+      }
     } catch (err) {
-      this.syncing = false;
-      this.status = '同步失败，请稍后重试';
+      if (!silent) {
+        this.status = '同步失败，请稍后重试';
+      } else {
+        this.silentFailReason = '同步失败，请稍后重试';
+      }
+    } finally {
+      if (silent) {
+        this.silentSyncBusy = false;
+        if (this.silentAwaitToast) {
+          this.silentAwaitToast = false;
+          this.toast(this.silentSyncOk ? '课表已更新'
+            : (this.silentFailReason || '课表更新未完成，可稍后手动重试'));
+        }
+      } else {
+        this.syncing = false;
+      }
+      this.startPendingTermSync();
     }
   }
 
-  private async doSync(): Promise<void> {
+  /** 当前同步收尾后，启动用户最近一次选择的学期同步。 */
+  private startPendingTermSync(): void {
+    if (this.pendingTermSync === '' || this.syncing || this.silentSyncBusy) {
+      return;
+    }
+    const term = this.pendingTermSync;
+    this.pendingTermSync = '';
+    if (term !== this.selectedTerm) {
+      return;
+    }
+    this.syncNow(false);
+  }
+
+  private async doSync(silent: boolean = false): Promise<void> {
     if (this.jwxt === null) {
       this.syncing = false;
       return;
     }
-    this.status = '正在更新课表…';
+    if (!silent) {
+      this.status = '正在更新课表…';
+    }
+    const requestedTerm = this.selectedTerm;
+    if (this.pendingTermSync !== '' && this.pendingTermSync === requestedTerm) {
+      // 这次同步就是在处理用户最近选择的学期，不必收尾后再补一次。
+      this.pendingTermSync = '';
+    }
     try {
-      const outcome = await this.jwxt.syncSchedule(this.selectedTerm);
+      const outcome = await this.jwxt.syncSchedule(requestedTerm);
       this.syncing = false;
+      if (outcome.cancelled) {
+        return;
+      }
+      // 同步期间用户可能已经切换到别的学期：这时旧学期的结果只写缓存，不刷界面。
+      const switched = this.selectedTerm !== requestedTerm;
       if (outcome.ok && outcome.schedule !== null) {
         const schedule = outcome.schedule;
+        if (switched) {
+          if (this.store !== null) {
+            this.store.save(schedule);
+          }
+          return;
+        }
         if (this.schedule !== null && this.schedule.term === schedule.term && !schedule.startDate) {
           schedule.startDate = this.schedule.startDate;
         }
         this.schedule = schedule;
         this.selectedTerm = schedule.term;
+        this.applyTerms(outcome.terms);
         const maxWeek = Math.max(1, schedule.maxWeek);
         this.currentWeek = Math.min(Math.max(1, this.currentWeek), maxWeek);
         this.calibrationWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
@@ -525,30 +707,55 @@ struct Index {
         await AppPrefs.setString('selectedTerm', schedule.term);
         this.status = `本地课表 · 更新于 ${formatStamp(schedule.savedAt)}`;
         this.rebuildLayout();
+        this.updateTodayStatus();
         this.refreshAutoWeek();
-        this.toast('课表已更新');
+        if (!silent) {
+          this.toast('课表已更新');
+        } else {
+          this.silentSyncOk = true;
+        }
+        return;
+      }
+      if (switched) {
         return;
       }
       if (outcome.needLogin) {
+        if (silent) {
+          // 后台发现会话失效：保留本地课表，不弹出登录面板。
+          hilog.info(DOMAIN, 'Index', 'silent sync session expired, keep cache');
+          this.silentFailReason = '登录已过期，请手动同步';
+          return;
+        }
         this.status = '登录已过期，请重新登录';
-        const check = await this.jwxt.readLoginState();
+        await this.jwxt.prefetchLoginPage();
+        const check = await this.jwxt.prepareLogin(12000);
         this.pendingSync = true;
-        this.openLoginSheet(check);
+        this.openLoginSheet(check.state === 'ready' ? check : await this.jwxt.readLoginState());
         return;
       }
       // 之前选中的学期可能已从学校页面下线，回退到学校当前学期再试一次。
       if (this.selectedTerm && outcome.message.indexOf('尚未开放') >= 0) {
         this.selectedTerm = '';
         await AppPrefs.remove('selectedTerm');
-        this.status = '正在切换到学校当前学期…';
-        this.syncing = true;
-        await this.doSync();
+        if (!silent) {
+          this.status = '正在切换到学校当前学期…';
+          this.syncing = true;
+        }
+        await this.doSync(silent);
         return;
       }
-      this.status = outcome.message;
+      if (!silent) {
+        this.status = outcome.message;
+      } else {
+        this.silentFailReason = outcome.message || '课表更新未完成';
+      }
     } catch (err) {
       this.syncing = false;
-      this.status = '同步失败，请稍后重试';
+      if (!silent) {
+        this.status = '同步失败，请稍后重试';
+      } else {
+        this.silentFailReason = '同步失败，请稍后重试';
+      }
     }
   }
 
@@ -589,6 +796,9 @@ struct Index {
       return;
     }
     try {
+      // 先加载一次登录页建立会话，再预取并改写密码框，最后重新加载。
+      await this.jwxt.prepareLogin();
+      await this.jwxt.prefetchLoginPage();
       const check = await this.jwxt.prepareLogin();
       this.loginBusy = false;
       if (check.state === 'success') {
@@ -618,6 +828,7 @@ struct Index {
     this.loginBusy = true;
     this.loginMessage = '正在刷新验证码…';
     try {
+      await this.jwxt.prefetchLoginPage();
       const check = await this.jwxt.prepareLogin(12000);
       this.loginBusy = false;
       if (check.state === 'ready') {
@@ -667,6 +878,8 @@ struct Index {
         this.pendingSync = false;
         this.syncing = true;
         await this.doSync();
+        this.syncing = false;
+        this.startPendingTermSync();
         return;
       }
       this.loginBusy = false;
@@ -798,6 +1011,130 @@ struct Index {
     this.rebuildLayout();
   }
 
+  /** 学校页面给出的可选学期列表，同步成功后缓存在本机（只保留最近四个学年）。 */
+  private applyTerms(source: string[]): void {
+    if (source.length === 0) {
+      return;
+    }
+    const terms = recentTerms(source);
+    if (terms.length === 0) {
+      return;
+    }
+    let same = this.availableTerms.length === terms.length;
+    if (same) {
+      for (let i = 0; i < terms.length; i++) {
+        if (this.availableTerms[i] !== terms[i]) {
+          same = false;
+          break;
+        }
+      }
+    }
+    if (same) {
+      return;
+    }
+    this.availableTerms = terms;
+    AppPrefs.setString('availableTerms', JSON.stringify(terms));
+  }
+
+  /** 周次面板里展示的学期：学校列表 + 当前学期兜底。 */
+  private termList(): string[] {
+    const list: string[] = [];
+    for (let i = 0; i < this.availableTerms.length; i++) {
+      const term = this.availableTerms[i];
+      if (term !== '' && list.indexOf(term) < 0) {
+        list.push(term);
+      }
+    }
+    let current = this.selectedTerm;
+    if (current === '' && this.schedule !== null) {
+      current = this.schedule.term;
+    }
+    if (current !== '' && list.indexOf(current) < 0) {
+      if (list.length === 0 || recentTerms([current]).length > 0) {
+        list.unshift(current);
+      }
+    }
+    return list;
+  }
+
+  private openWeekPicker(): void {
+    if (this.schedule === null && this.termList().length === 0) {
+      this.toast('请先同步课表');
+      return;
+    }
+    this.sheetWeek = this.currentWeek;
+    this.openSheet(4);
+  }
+
+  /** 把面板里选中的周应用为当前浏览周，不改变“真实本周”。 */
+  private applySheetWeek(): void {
+    if (this.schedule === null) {
+      this.closeSheet();
+      return;
+    }
+    const maxWeek = Math.max(1, this.schedule.maxWeek);
+    this.currentWeek = Math.min(Math.max(1, this.sheetWeek), maxWeek);
+    this.rebuildLayout();
+    this.closeSheet();
+  }
+
+  /** 一键回到真实本周（校准周），不改变校准值本身。 */
+  private goToCurrentWeek(): void {
+    if (this.schedule === null) {
+      this.closeSheet();
+      return;
+    }
+    const maxWeek = Math.max(1, this.schedule.maxWeek);
+    this.currentWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
+    this.rebuildLayout();
+    this.closeSheet();
+  }
+
+  /** 切换学期：先用本地缓存秒开；没有缓存就显示空课表等待。 */
+  private async switchTerm(term: string): Promise<void> {
+    if (term === '') {
+      return;
+    }
+    if (term === this.selectedTerm) {
+      this.closeSheet();
+      return;
+    }
+    this.closeSheet();
+    this.selectedTerm = term;
+    await AppPrefs.setString('selectedTerm', term);
+    if (this.store !== null) {
+      const cached = this.store.load(term);
+      if (cached !== null) {
+        this.schedule = cached;
+        const maxWeek = Math.max(1, cached.maxWeek);
+        this.currentWeek = Math.min(Math.max(1, this.currentWeek), maxWeek);
+        this.calibrationWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
+        this.status = cached.savedAt
+          ? `本地课表 · 上次更新 ${formatStamp(cached.savedAt)}` : '本地课表';
+        this.rebuildLayout();
+        this.updateTodayStatus();
+      } else {
+        // 没有该学期的本地缓存：清掉旧学期课表，空课表等待同步。
+        this.schedule = null;
+        this.layouts = [];
+        this.currentWeek = 1;
+        this.calibrationWeek = 1;
+        this.status = '正在获取该学期课表…';
+        this.updateTodayStatus();
+      }
+    }
+    if (this.syncing || this.silentSyncBusy) {
+      // 最新操作优先：取消正在跑的任务，它退出后会自动开始这次的学期同步。
+      this.pendingTermSync = term;
+      this.silentAwaitToast = false;
+      if (this.jwxt !== null) {
+        this.jwxt.cancel();
+      }
+      return;
+    }
+    await this.syncNow(false);
+  }
+
   /** 只有浏览的周正好是校准出来的本周时，才高亮今天。 */
   private isTodayColumn(day: number): boolean {
     return this.currentWeek === this.calibrationWeek && this.todayDay === day;
@@ -810,6 +1147,7 @@ struct Index {
     AppPrefs.setNumber('currentWeek', this.calibrationWeek);
     this.closeSheet();
     this.rebuildLayout();
+    this.updateTodayStatus();
     this.toast(`已将第 ${this.calibrationWeek} 周设为本周 · 手动校准`);
   }
 
@@ -820,17 +1158,53 @@ struct Index {
     if (this.autoWeekValue > 0) {
       this.currentWeek = this.autoWeekValue;
       this.rebuildLayout();
+      this.updateTodayStatus();
       this.toast(`已恢复自动计算：第 ${this.autoWeekValue} 周`);
     } else {
       this.toast('暂时无法读取校历，请手动校准');
     }
   }
 
-  private weekCourseCount(): number {
-    if (this.schedule === null) {
-      return 0;
+  /** 根据真实本周与今天，构建倒计时条需要的数据。 */
+  private updateTodayStatus(): void {
+    const status = new DayStatus();
+    if (this.schedule !== null) {
+      const today = this.schedule.at(this.calibrationWeek, this.todayDay);
+      const slots: ClassSlot[] = [];
+      for (let i = 0; i < today.length; i++) {
+        const c = today[i];
+        const slot = new ClassSlot();
+        slot.name = c.name;
+        slot.room = c.room;
+        slot.start = c.start;
+        slot.end = c.end;
+        slots.push(slot);
+      }
+      slots.sort((a: ClassSlot, b: ClassSlot) => a.start - b.start);
+      status.today = slots;
     }
-    return this.schedule.at(this.currentWeek).length;
+    this.statusJson = JSON.stringify(status);
+  }
+
+  /**
+   * 点击倒计时条里“正在上 / 下一节”那行时，定位今天对应的那节课并打开详情。
+   * 同一门课在不同日期的教室可能不同，所以按今天 + 节次 + 课程名 + 教室精确匹配，
+   * 与 updateTodayStatus 使用同一份课程数据。
+   */
+  private openCourseFromBar(name: string, room: string, start: number, end: number): void {
+    if (this.schedule === null) {
+      return;
+    }
+    const list = this.schedule.at(this.calibrationWeek, this.todayDay);
+    for (let i = 0; i < list.length; i++) {
+      const course = list[i];
+      if (course.name === name && course.room === room &&
+        course.start === start && course.end === end) {
+        this.selectedCourse = course;
+        this.openSheet(2);
+        return;
+      }
+    }
   }
 
   private maxWeekValue(): number {
@@ -863,12 +1237,14 @@ struct Index {
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.theme.ink)
-          Text(subtitle)
-            .fontSize(12)
-            .fontColor(this.theme.muted)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .margin({ top: 3 })
+          if (subtitle !== '') {
+            Text(subtitle)
+              .fontSize(12)
+              .fontColor(this.theme.muted)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .margin({ top: 3 })
+          }
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
@@ -877,18 +1253,18 @@ struct Index {
           Stack() {
             if (this.syncing) {
               LoadingProgress()
-                .width(24)
-                .height(24)
+                .width(22)
+                .height(22)
                 .color(this.theme.primary)
             } else {
-              Text('⟳')
-                .fontSize(22)
-                .fontColor(this.theme.primary)
+              SymbolGlyph($r('sys.symbol.arrow_clockwise'))
+                .fontSize(20)
+                .fontColor([this.theme.primary])
             }
           }
-          .width(44)
-          .height(44)
-          .borderRadius(22)
+          .width(36)
+          .height(36)
+          .borderRadius(18)
           .backgroundColor(this.theme.primarySoft)
           .onClick(() => {
             if (!this.syncing) {
@@ -901,31 +1277,7 @@ struct Index {
       .alignItems(VerticalAlign.Center)
     }
     .width('100%')
-    .padding({ left: 18, right: 18, top: 14, bottom: 8 })
-  }
-
-  @Builder StatusLine() {
-    Row() {
-      Circle()
-        .width(7)
-        .height(7)
-        .fill(this.syncing ? this.theme.primary : (this.loggedIn ? this.theme.ok : this.theme.muted))
-      Text(this.status)
-        .fontSize(12)
-        .fontColor(this.syncing ? this.theme.primaryDeep : this.theme.muted)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .margin({ left: 6 })
-        .layoutWeight(1)
-      if (this.schedule !== null) {
-        Text(`本周 ${this.weekCourseCount()} 门`)
-          .fontSize(11)
-          .fontColor(this.theme.muted)
-      }
-    }
-    .width('100%')
-    .padding({ left: 18, right: 18, bottom: 6 })
-    .alignItems(VerticalAlign.Center)
+    .padding({ left: 18, right: 18, top: 12, bottom: 6 })
   }
 
   @Builder WeekBar() {
@@ -946,12 +1298,21 @@ struct Index {
           .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.theme.ink)
-        Text(this.schedule !== null ? `共 ${this.schedule.maxWeek} 教学周` : '等待同步')
+        Text(this.schedule !== null ? shortTermLabel(this.schedule.term) : '等待同步')
           .fontSize(10)
           .fontColor(this.theme.muted)
+          .width('100%')
+          .textAlign(TextAlign.Center)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .layoutWeight(1)
+      .height(36)
+      .justifyContent(FlexAlign.Center)
       .alignItems(HorizontalAlign.Center)
+      .onClick(() => {
+        this.openWeekPicker();
+      })
 
       Text('›')
         .fontSize(28)
@@ -1197,8 +1558,18 @@ struct Index {
 
   @Builder ScheduleView() {
     Column() {
-      this.TopBar('江小汉快快下课', this.selectedTerm || '登录后自动获取学期', true)
-      this.StatusLine()
+      this.TopBar('江小汉快快下课', '', true)
+      NextClassBar({
+        themeId: this.themeId,
+        dark: this.theme.dark,
+        syncing: this.syncing,
+        statusText: this.status,
+        hasSchedule: this.schedule !== null,
+        statusJson: this.statusJson,
+        onTapCourse: (name: string, room: string, start: number, end: number) => {
+          this.openCourseFromBar(name, room, start, end);
+        }
+      })
       this.WeekBar()
       this.DayHeader()
       if (this.schedule === null) {
@@ -1522,7 +1893,7 @@ struct Index {
           .borderRadius(18)
           .margin({ top: 12 })
 
-          Text('版本 0.1.0 · 作者·凩新')
+          Text('版本 0.2.0 · 作者·凩新')
             .fontSize(10)
             .fontColor(this.theme.faint)
             .margin({ top: 18, bottom: 12 })
@@ -1896,6 +2267,142 @@ struct Index {
     .backgroundColor(this.theme.card)
   }
 
+  @Builder WeekPickerSheet() {
+    Column() {
+      Text('跳转到教学周')
+        .fontSize(19)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.theme.ink)
+      Text(this.schedule !== null ? shortTermLabel(this.schedule.term) : '尚未同步课表')
+        .fontSize(10)
+        .fontColor(this.theme.muted)
+        .margin({ top: 5 })
+        .width('100%')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+      Text(this.schedule !== null ? `第 ${this.sheetWeek} 周` : '—')
+        .fontSize(30)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.theme.primary)
+        .margin({ top: 12 })
+
+      Slider({
+        value: this.sheetWeek,
+        min: 1,
+        max: this.maxWeekValue(),
+        step: 1
+      })
+        .selectedColor(this.theme.primary)
+        .showSteps(false)
+        .width('100%')
+        .margin({ top: 4 })
+        .enabled(this.schedule !== null)
+        .onChange((value: number) => {
+          this.sheetWeek = Math.round(value);
+        })
+
+      Row() {
+        Text('第 1 周')
+          .fontSize(10)
+          .fontColor(this.theme.muted)
+        Blank()
+        Text(`第 ${this.maxWeekValue()} 周`)
+          .fontSize(10)
+          .fontColor(this.theme.muted)
+      }
+      .width('100%')
+
+      Text('切换学期')
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.theme.ink)
+        .margin({ top: 14 })
+        .width('100%')
+
+      if (this.termList().length === 0) {
+        Text('同步课表后可以切换其他学期')
+          .fontSize(11)
+          .fontColor(this.theme.muted)
+          .margin({ top: 8 })
+          .width('100%')
+      } else {
+        Scroll() {
+          Column() {
+            ForEach(this.termList(), (term: string) => {
+              Row() {
+                Text(shortTermLabel(term))
+                  .fontSize(13)
+                  .fontColor(term === this.selectedTerm ? this.theme.primary : this.theme.ink)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                if (term === this.selectedTerm) {
+                  SymbolGlyph($r('sys.symbol.checkmark'))
+                    .fontSize(16)
+                    .fontColor([this.theme.primary])
+                }
+              }
+              .width('100%')
+              .height(38)
+              .padding({ left: 12, right: 12 })
+              .borderRadius(10)
+              .backgroundColor(term === this.selectedTerm ? this.theme.primarySoft : Color.Transparent)
+              .margin({ bottom: 4 })
+              .onClick(() => {
+                this.switchTerm(term);
+              })
+            }, (term: string) => term)
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .constraintSize({ maxHeight: 150 })
+        .scrollBar(BarState.Off)
+        .margin({ top: 6 })
+      }
+
+      Row() {
+        Text('取消')
+          .fontSize(14)
+          .fontColor(this.theme.muted)
+          .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+          .onClick(() => {
+            this.closeSheet();
+          })
+
+        Blank()
+
+        Text('回到本周')
+          .fontSize(13)
+          .fontColor(this.theme.primary)
+          .backgroundColor(this.theme.primarySoft)
+          .borderRadius(20)
+          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+          .margin({ right: 10 })
+          .onClick(() => {
+            this.goToCurrentWeek();
+          })
+
+        Text('跳转')
+          .fontSize(14)
+          .fontColor(this.theme.onPrimary)
+          .backgroundColor(this.theme.primary)
+          .borderRadius(20)
+          .padding({ left: 24, right: 24, top: 10, bottom: 10 })
+          .onClick(() => {
+            this.applySheetWeek();
+          })
+      }
+      .width('100%')
+      .margin({ top: 14 })
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 20, bottom: 20 })
+    .backgroundColor(this.theme.card)
+  }
+
   @Builder ActiveSheet() {
     if (this.sheetKind === 1) {
       this.LoginSheet()
@@ -1903,6 +2410,8 @@ struct Index {
       this.CourseDetailSheet()
     } else if (this.sheetKind === 3) {
       this.WeekSheet()
+    } else if (this.sheetKind === 4) {
+      this.WeekPickerSheet()
     }
   }
 
@@ -1936,19 +2445,29 @@ struct Index {
           .domStorageAccess(true)
           .fileAccess(false)
           .mixedMode(MixedMode.All)
+          .password(false)
           .onControllerAttached(() => {
             this.webReady = true;
             hilog.info(DOMAIN, 'Index', 'web controller attached');
             this.maybeAutoSync();
           })
           .onPageBegin((event) => {
+            if (this.jwxt !== null) {
+              this.jwxt.notePageBegin();
+            }
             hilog.info(DOMAIN, 'Index', 'web begin: %{public}s', event.url);
           })
           .onPageEnd((event) => {
+            if (this.jwxt !== null) {
+              this.jwxt.notePageEnd();
+            }
             hilog.info(DOMAIN, 'Index', 'web end: %{public}s', event.url);
           })
           .onErrorReceive((event) => {
             if (event.request.isMainFrame()) {
+              if (this.jwxt !== null) {
+                this.jwxt.notePageFailed();
+              }
               hilog.error(DOMAIN, 'Index', 'web error: %{public}s code=%{public}d',
                 event.error.getErrorInfo(), event.error.getErrorCode());
             }
@@ -1968,6 +2487,24 @@ struct Index {
             }
             return true;
           })
+          .onInterceptRequest((event) => {
+            if (this.jwxt === null) {
+              return null;
+            }
+            const url = event.request.getRequestUrl();
+            if (!url.startsWith(JWXT_LOGIN)) {
+              return null;
+            }
+            const html = this.jwxt.patchedLoginHtml();
+            if (html === null) {
+              return null;
+            }
+            const resp = new WebResourceResponse();
+            resp.setResponseData(html);
+            resp.setResponseEncoding('GBK');
+            resp.setResponseMimeType('text/html');
+            return resp;
+          })
       }
     }
     .width('100%')
@@ -1977,12 +2514,7 @@ struct Index {
       height: this.sheetKind === 2 ? 360 : (this.sheetKind === 3 ? 390 : 500),
       backgroundColor: this.theme.card,
       dragBar: true,
-      showClose: false,
-      onDisappear: () => {
-        this.loginPassword = '';
-        this.loginCaptcha = '';
-        this.sheetKind = 0;
-      }
+      showClose: false
     })
   }
 }

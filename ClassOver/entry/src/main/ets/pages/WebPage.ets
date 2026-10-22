@@ -213,6 +213,7 @@ struct WebPage {
           .domStorageAccess(true)
           .fileAccess(false)
           .mixedMode(MixedMode.All)
+          .password(false)
           .darkMode(WebDarkMode.Auto)
           .onPageBegin(() => {
             this.loading = true;

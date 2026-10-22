@@ -1,10 +1,30 @@
 import { webview } from '@kit.ArkWeb';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { http } from '@kit.NetworkKit';
 import { Schedule, ScheduleJson } from '../model/Schedule';
 import { parseTerm } from '../model/Term';
 import { Scripts, quote } from './Scripts';
 
 const DOMAIN = 0x0001;
+
+/** 按 latin1（ISO-8859-1）把字节无损转成字符串，GBK 多字节也能保住。 */
+function latin1Decode(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    out += String.fromCharCode(bytes[i]);
+  }
+  return out;
+}
+
+/** latin1 字符串无损转回字节。 */
+function latin1Encode(str: string): ArrayBuffer {
+  const out = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    out[i] = str.charCodeAt(i) & 0xFF;
+  }
+  return out.buffer;
+}
 
 export const JWXT_HOME = 'https://jwxt.jhun.edu.cn/frame/homes.action';
 export const JWXT_LOGIN = 'https://jwxt.jhun.edu.cn/cas/login.action';
@@ -37,7 +57,7 @@ export interface WebResult {
 }
 
 export interface LoginCheck {
-  state: string; // success | ready | waiting | unsupported | error
+  state: string; // success | ready | waiting | unsupported | cancelled | error
   captcha: boolean;
   image: string;
   message: string;
@@ -46,6 +66,7 @@ export interface LoginCheck {
 export interface SyncOutcome {
   ok: boolean;
   needLogin: boolean;
+  cancelled?: boolean;
   schedule: Schedule | null;
   terms: string[];
   selectedTerm: string;
@@ -64,9 +85,72 @@ export class JwxtWeb {
   private controller: webview.WebviewController;
   private jobId: number = 1;
   private lastLoginState: string = '';
+  private modifiedLoginHtml: ArrayBuffer | null = null;
+  private pageLoading: boolean = false;
+  private pageStartedAt: number = 0;
+  private pageFailed: boolean = false;
+  private cancelToken: number = 0;
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
+  }
+
+  /**
+   * 取消正在进行的会话检查/登录等待/课表同步。
+   * 循环会在下一个检查点退出，页面上的请求会自然结束，不影响后续任务。
+   */
+  cancel(): void {
+    this.cancelToken = this.cancelToken + 1;
+    hilog.info(DOMAIN, 'JwxtWeb', 'cancel requested, generation=%{public}d', this.cancelToken);
+  }
+
+  /** 当前的取消代次，调用方用它判断自己的任务是否已被取消。 */
+  generation(): number {
+    return this.cancelToken;
+  }
+
+  /**
+   * 预取学校登录页，把密码框从 type=password 改成 type=text。
+   * 这样 Chromium 在解析 DOM 时看到的就是非密码框，不会触发系统密码保险箱。
+   */
+  async prefetchLoginPage(): Promise<void> {
+    this.modifiedLoginHtml = null;
+    try {
+      let cookie = '';
+      try {
+        cookie = webview.WebCookieManager.fetchCookieSync(JWXT_LOGIN);
+      } catch (err) {
+        cookie = '';
+      }
+      const header: Record<string, string> = {};
+      if (cookie) {
+        header['Cookie'] = cookie;
+      }
+      const httpRequest = http.createHttp();
+      const resp = await httpRequest.request(JWXT_LOGIN, {
+        method: http.RequestMethod.GET,
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        connectTimeout: 8000,
+        readTimeout: 8000,
+        header: header
+      });
+      if (resp.responseCode === 200) {
+        const buf = resp.result as ArrayBuffer;
+        const text = latin1Decode(buf);
+        const modified = text.replace(/type\s*=\s*["']password["']/gi, 'type="text"');
+        this.modifiedLoginHtml = latin1Encode(modified);
+        hilog.info(DOMAIN, 'JwxtWeb', 'login page prefetched and patched');
+      }
+      httpRequest.destroy();
+    } catch (err) {
+      this.modifiedLoginHtml = null;
+      hilog.warn(DOMAIN, 'JwxtWeb', 'prefetch login page failed: %{public}s', (err as Error).message);
+    }
+  }
+
+  /** 改写后的登录页 HTML；未预取成功时返回 null。 */
+  patchedLoginHtml(): ArrayBuffer | null {
+    return this.modifiedLoginHtml;
   }
 
   /** 安全地执行一段返回 JSON 的脚本。 */
@@ -220,6 +304,36 @@ export class JwxtWeb {
     }
   }
 
+  /** 记录主框架导航开始/结束，用来判断能否复用当前页面而不是重新加载。 */
+  notePageBegin(): void {
+    this.pageLoading = true;
+    this.pageStartedAt = Date.now();
+    this.pageFailed = false;
+  }
+
+  notePageEnd(): void {
+    this.pageLoading = false;
+  }
+
+  /** 主框架加载失败：允许 checkSession 立即重试，而不是空等超时。 */
+  notePageFailed(): void {
+    this.pageLoading = false;
+    this.pageFailed = true;
+  }
+
+  /** 当前页面是否已经可以用于探测会话，无需再 loadHome。 */
+  private reusablePage(): boolean {
+    if (this.pageFailed) {
+      return false;
+    }
+    const url = this.currentUrl();
+    if (url.indexOf('/frame/homes.action') >= 0 || url.indexOf('/cas/login.action') >= 0) {
+      return true;
+    }
+    // 首页正在加载时应该等它，而不是打断重来。
+    return this.pageLoading && this.pageStartedAt > 0 && Date.now() - this.pageStartedAt < 15000;
+  }
+
   currentUrl(): string {
     try {
       const value = this.controller.getUrl();
@@ -338,12 +452,22 @@ export class JwxtWeb {
    */
   async checkSession(timeoutMs: number = 20000): Promise<LoginCheck> {
     hilog.info(DOMAIN, 'JwxtWeb', 'check session start');
-    if (!this.loadHome()) {
-      return { state: 'error', captcha: false, image: '', message: '教务浏览器未就绪，请稍后重试' };
+    const token = this.cancelToken;
+    // Web 组件创建时已经带着首页 src 开始加载；如果正在加载或已经停在
+    // 首页/登录页，直接复用，避免重复整页加载（慢的主要来源之一）。
+    if (!this.reusablePage()) {
+      if (!this.loadHome()) {
+        return { state: 'error', captcha: false, image: '', message: '教务浏览器未就绪，请稍后重试' };
+      }
     }
     const deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    let retried = false;
     while (Date.now() < deadline) {
-      await sleep(650);
+      await sleep(300);
+      if (this.cancelToken !== token) {
+        return { state: 'cancelled', captcha: false, image: '', message: '已取消' };
+      }
       const check = await this.readLoginState();
       if (check.state === 'success') {
         await this.persistCookies();
@@ -352,6 +476,12 @@ export class JwxtWeb {
       if (check.state === 'ready') {
         return check;
       }
+      // 初始加载已经结束但不在首页/登录页（或加载失败）时，重试一次。
+      if (!retried && Date.now() - startedAt > 1200 && !this.reusablePage()) {
+        retried = true;
+        hilog.warn(DOMAIN, 'JwxtWeb', 'check session retry load home');
+        this.loadHome();
+      }
     }
     hilog.warn(DOMAIN, 'JwxtWeb', 'check session timeout, final url: %{public}s', this.currentUrl());
     return { state: 'error', captcha: false, image: '', message: '连接学校超时' };
@@ -359,12 +489,16 @@ export class JwxtWeb {
 
   /** 打开登录页并等待表单就绪（用于手动登录 / 验证码）。 */
   async prepareLogin(timeoutMs: number = 20000): Promise<LoginCheck> {
+    const token = this.cancelToken;
     if (!this.loadLogin()) {
       return { state: 'error', captcha: false, image: '', message: '登录页未就绪，请稍后重试' };
     }
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      await sleep(650);
+      await sleep(300);
+      if (this.cancelToken !== token) {
+        return { state: 'cancelled', captcha: false, image: '', message: '已取消' };
+      }
       const check = await this.readLoginState();
       if (check.state === 'ready' || check.state === 'success') {
         return check;
@@ -376,7 +510,11 @@ export class JwxtWeb {
   /** 提交账号密码（以及验证码），等待登录成功。 */
   async submitLogin(account: string, password: string, code: string, timeoutMs: number = 20000): Promise<LoginCheck> {
     const startedAt = Date.now();
+    const token = this.cancelToken;
     const submit = await this.evalJson(this.directSubmitScript(account, password, code));
+    if (this.cancelToken !== token) {
+      return { state: 'cancelled', captcha: false, image: '', message: '已取消' };
+    }
     if (submit === null) {
       return { state: 'error', captcha: false, image: '', message: '无法提交登录表单' };
     }
@@ -389,7 +527,10 @@ export class JwxtWeb {
     }
     const deadline = startedAt + timeoutMs;
     while (Date.now() < deadline) {
-      await sleep(650);
+      await sleep(300);
+      if (this.cancelToken !== token) {
+        return { state: 'cancelled', captcha: false, image: '', message: '已取消' };
+      }
       const check = await this.readLoginState();
       if (check.state === 'success') {
         await this.persistCookies();
@@ -410,27 +551,42 @@ export class JwxtWeb {
     hilog.info(DOMAIN, 'JwxtWeb', 'schedule sync start term=%{public}s', term || '(school current)');
     this.jobId = this.jobId + 1;
     const jobId = this.jobId;
-    // 每次同步从教务首页开始，确保脚本在正确的 frame 环境中运行。
-    if (!this.loadHome()) {
-      return {
-        ok: false,
-        needLogin: false,
-        schedule: null,
-        terms: [],
-        selectedTerm: '',
-        message: '教务浏览器未就绪，请稍后重试'
-      };
+    const token = this.cancelToken;
+    // 会话检查结束时页面通常已经停在教务首页，直接复用；
+    // 只有不在首页时才重新加载，省掉一次整页加载。
+    if (this.currentUrl().indexOf('/frame/homes.action') < 0) {
+      if (!this.loadHome()) {
+        return {
+          ok: false,
+          needLogin: false,
+          schedule: null,
+          terms: [],
+          selectedTerm: '',
+          message: '教务浏览器未就绪，请稍后重试'
+        };
+      }
+      await sleep(400);
     }
-    await sleep(900);
     const deadline = Date.now() + timeoutMs;
     let lastMessage = '正在获取课表';
     let terms: string[] = [];
     let selectedTerm = '';
 
     while (Date.now() < deadline) {
+      if (this.cancelToken !== token) {
+        return {
+          ok: false,
+          needLogin: false,
+          cancelled: true,
+          schedule: null,
+          terms: terms,
+          selectedTerm: selectedTerm,
+          message: '已取消'
+        };
+      }
       const result = await this.evalJson(this.scheduleScript(jobId, term));
       if (result === null) {
-        await sleep(700);
+        await sleep(300);
         continue;
       }
       if (result.terms && Array.isArray(result.terms)) {
@@ -494,7 +650,7 @@ export class JwxtWeb {
       } else {
         lastMessage = '正在获取课表';
       }
-      await sleep(700);
+      await sleep(300);
     }
     return {
       ok: false,
