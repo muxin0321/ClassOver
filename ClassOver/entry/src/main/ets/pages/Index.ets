@@ -5,7 +5,7 @@ import { url } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Course } from '../model/Course';
 import { DEFAULT_ENDS, DEFAULT_STARTS, Schedule } from '../model/Schedule';
-import { weekOfTerm, parseTerm } from '../model/Term';
+import { weekOfTerm, parseTerm, termEnded } from '../model/Term';
 import { ClassSlot, DayStatus, NextClassBar } from '../components/NextClassBar';
 import { AppPrefs } from '../store/AppPrefs';
 import { AcademicStore } from '../store/AcademicStore';
@@ -74,6 +74,7 @@ class CourseLayout {
   h: number = 0;
   bg: string = '';
   fg: string = '';
+  active: boolean = false;
 
   constructor(course: Course) {
     this.course = course;
@@ -150,6 +151,40 @@ function recentTerms(terms: string[]): string[] {
   return result;
 }
 
+/** "08:20" → 500（分钟）。 */
+function hhmmToMinutes(value: string): number {
+  const parts = value.split(':');
+  if (parts.length !== 2) {
+    return 0;
+  }
+  return Number(parts[0]) * 60 + Number(parts[1]);
+}
+
+function mixChannel(from: number, to: number, ratio: number): number {
+  return Math.round(from * (1 - ratio) + to * ratio);
+}
+
+/** 把颜色按比例混向目标色，用于课程卡的加深（黑）或提亮（白）。 */
+function blendColor(hex: string, target: string, ratio: number): string {
+  if (hex.length !== 7 || target.length !== 7) {
+    return hex;
+  }
+  const r = Number.parseInt(hex.substring(1, 3), 16);
+  const g = Number.parseInt(hex.substring(3, 5), 16);
+  const b = Number.parseInt(hex.substring(5, 7), 16);
+  const tr = Number.parseInt(target.substring(1, 3), 16);
+  const tg = Number.parseInt(target.substring(3, 5), 16);
+  const tb = Number.parseInt(target.substring(5, 7), 16);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b) ||
+    !Number.isFinite(tr) || !Number.isFinite(tg) || !Number.isFinite(tb)) {
+    return hex;
+  }
+  const nr = mixChannel(r, tr, ratio).toString(16).padStart(2, '0');
+  const ng = mixChannel(g, tg, ratio).toString(16).padStart(2, '0');
+  const nb = mixChannel(b, tb, ratio).toString(16).padStart(2, '0');
+  return `#${nr}${ng}${nb}`;
+}
+
 @Entry
 @Component
 struct Index {
@@ -183,6 +218,8 @@ struct Index {
   @State statusJson: string = '';
   @State sheetWeek: number = 1;
   @State availableTerms: string[] = [];
+  @State onVacation: boolean = false;
+  @State nowMinute: number = 0;
 
   @State showSheet: boolean = false;
   @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准
@@ -214,6 +251,7 @@ struct Index {
   private silentFailReason: string = '';
   private silentAwaitToast: boolean = false;
   private pendingTermSync: string = '';
+  private clockTimer: number = -1;
 
   private links: QuickLink[] = [
     new QuickLink('电费查询', '电量查询 · 在线缴费', $r('sys.symbol.bolt_1'), ELECTRICITY_URL, 'electricity', true),
@@ -225,13 +263,14 @@ struct Index {
   ];
 
   aboutToAppear(): void {
+    this.tickClock();
     this.init();
+    this.startClock();
   }
 
   onPageShow(): void {
-    const today = new Date().getDay();
-    this.todayDay = today === 0 ? 7 : today;
-    this.updateTodayStatus();
+    this.tickClock();
+    this.startClock();
     this.applySystemBars();
     if (this.loginWebOpened) {
       this.loginWebOpened = false;
@@ -243,6 +282,41 @@ struct Index {
     if (this.silentSyncTimer !== -1) {
       clearTimeout(this.silentSyncTimer);
       this.silentSyncTimer = -1;
+    }
+    if (this.clockTimer !== -1) {
+      clearInterval(this.clockTimer);
+      this.clockTimer = -1;
+    }
+  }
+
+  /** 每 30 秒刷新当前分钟、日期和假期状态；分钟变化时重算课程卡高亮。 */
+  private startClock(): void {
+    if (this.clockTimer !== -1) {
+      return;
+    }
+    this.clockTimer = setInterval(() => {
+      this.tickClock();
+    }, 30000);
+  }
+
+  private tickClock(): void {
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    const day = now.getDay();
+    const today = day === 0 ? 7 : day;
+    let changed = false;
+    if (minutes !== this.nowMinute) {
+      this.nowMinute = minutes;
+      changed = true;
+    }
+    if (today !== this.todayDay) {
+      this.todayDay = today;
+      this.updateTodayStatus();
+      changed = true;
+    }
+    this.refreshVacation();
+    if (changed && this.schedule !== null) {
+      this.rebuildLayout();
     }
   }
 
@@ -334,6 +408,7 @@ struct Index {
     hilog.info(DOMAIN, 'Index', 'init done: webCapable=%{public}s webReady=%{public}s scripts=%{public}s',
       `${this.webCapable}`, `${this.webReady}`, `${this.scriptLoaded}`);
     this.updateTodayStatus();
+    this.refreshVacation();
     this.refreshAutoWeek();
     this.maybeAutoSync();
   }
@@ -370,6 +445,46 @@ struct Index {
     return Date.now() - schedule.savedAt < CACHE_FRESH_MS;
   }
 
+  /** 当前显示的是不是可选学期里最新的那个（旧学期不显示假期页）。 */
+  private isLatestTerm(): boolean {
+    const schedule = this.schedule;
+    if (schedule === null) {
+      return false;
+    }
+    const current = parseTerm(schedule.term);
+    if (current === null) {
+      return false;
+    }
+    const currentKey = current.year * 2 + current.half;
+    let latest = currentKey;
+    for (let i = 0; i < this.availableTerms.length; i++) {
+      const info = parseTerm(this.availableTerms[i]);
+      if (info !== null) {
+        latest = Math.max(latest, info.year * 2 + info.half);
+      }
+    }
+    return currentKey === latest;
+  }
+
+  /** 最新学期结束且已知开学日期时，课表页进入假期页。 */
+  private isVacationNow(): boolean {
+    const schedule = this.schedule;
+    if (schedule === null || schedule.startDate === '') {
+      return false;
+    }
+    if (!this.isLatestTerm()) {
+      return false;
+    }
+    return termEnded(schedule.startDate, schedule.maxWeek);
+  }
+
+  private refreshVacation(): void {
+    const next = this.isVacationNow();
+    if (next !== this.onVacation) {
+      this.onVacation = next;
+    }
+  }
+
   /**
    * 优先用缓存里的校历开始日期计算周次；没有缓存时再从学校公开校历读取。
    * 手动校准过的学期不覆盖用户设置，但仍记录自动周次供校准面板展示。
@@ -393,6 +508,7 @@ struct Index {
           if (this.store !== null) {
             this.store.save(schedule);
           }
+          this.refreshVacation();
         }
       }
       if (!start) {
@@ -415,6 +531,7 @@ struct Index {
       AppPrefs.setNumber('currentWeek', autoWeek);
       this.rebuildLayout();
       this.updateTodayStatus();
+      this.refreshVacation();
     } finally {
       this.autoWeekRefreshing = false;
     }
@@ -708,6 +825,7 @@ struct Index {
         this.status = `本地课表 · 更新于 ${formatStamp(schedule.savedAt)}`;
         this.rebuildLayout();
         this.updateTodayStatus();
+        this.refreshVacation();
         this.refreshAutoWeek();
         if (!silent) {
           this.toast('课表已更新');
@@ -991,8 +1109,15 @@ struct Index {
       layout.w = columnWidth - 1;
       layout.h = bottom - top - 2;
       const palette = this.theme.courses[colorIndex(course.name, this.theme.courses.length)];
-      layout.bg = palette.bg;
       layout.fg = palette.fg;
+      layout.active = this.isCourseActive(course);
+      if (layout.active) {
+        // 浅色主题加深、深色主题提亮，配合 2vp 边框突出正在上的课。
+        layout.bg = blendColor(palette.bg, this.theme.dark ? '#FFFFFF' : '#000000',
+          this.theme.dark ? 0.12 : 0.10);
+      } else {
+        layout.bg = palette.bg;
+      }
       result.push(layout);
     }
     this.layouts = result;
@@ -1123,6 +1248,7 @@ struct Index {
         this.updateTodayStatus();
       }
     }
+    this.refreshVacation();
     if (this.syncing || this.silentSyncBusy) {
       // 最新操作优先：取消正在跑的任务，它退出后会自动开始这次的学期同步。
       this.pendingTermSync = term;
@@ -1138,6 +1264,16 @@ struct Index {
   /** 只有浏览的周正好是校准出来的本周时，才高亮今天。 */
   private isTodayColumn(day: number): boolean {
     return this.currentWeek === this.calibrationWeek && this.todayDay === day;
+  }
+
+  /** 当前时间是否正在上这门课（只对真实本周的今天生效）。 */
+  private isCourseActive(course: Course): boolean {
+    if (!this.isTodayColumn(course.day) || !course.hasWeek(this.calibrationWeek)) {
+      return false;
+    }
+    const start = hhmmToMinutes(DEFAULT_STARTS[course.start - 1]);
+    const end = hhmmToMinutes(DEFAULT_ENDS[course.end - 1]);
+    return this.nowMinute >= start && this.nowMinute < end;
   }
 
   private setCurrentWeek(): void {
@@ -1506,6 +1642,11 @@ struct Index {
     .width(layout.w)
     .height(layout.h)
     .backgroundColor(layout.bg)
+    .outline({
+      width: layout.active ? 2 : 0,
+      color: this.theme.primary,
+      radius: 8
+    })
     .borderRadius(8)
     .position({ x: layout.x, y: layout.y })
     .zIndex(2)
@@ -1556,6 +1697,21 @@ struct Index {
     .padding({ bottom: 40 })
   }
 
+  @Builder HolidayView() {
+    Column() {
+      Text('假期时光！请美美放松一下吧！')
+        .fontSize(17)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.theme.primary)
+        .textAlign(TextAlign.Center)
+        .padding({ left: 32, right: 32 })
+    }
+    .width('100%')
+    .layoutWeight(1)
+    .justifyContent(FlexAlign.Center)
+    .padding({ bottom: 40 })
+  }
+
   @Builder ScheduleView() {
     Column() {
       this.TopBar('江小汉快快下课', '', true)
@@ -1565,15 +1721,20 @@ struct Index {
         syncing: this.syncing,
         statusText: this.status,
         hasSchedule: this.schedule !== null,
+        vacation: this.onVacation,
         statusJson: this.statusJson,
         onTapCourse: (name: string, room: string, start: number, end: number) => {
           this.openCourseFromBar(name, room, start, end);
         }
       })
       this.WeekBar()
-      this.DayHeader()
+      if (!this.onVacation) {
+        this.DayHeader()
+      }
       if (this.schedule === null) {
         this.EmptySchedule()
+      } else if (this.onVacation) {
+        this.HolidayView()
       } else {
         Scroll() {
           Row() {
@@ -1583,7 +1744,7 @@ struct Index {
               ForEach(this.layouts, (layout: CourseLayout) => {
                 this.CourseCard(layout)
               }, (layout: CourseLayout) =>
-                `${layout.course.day}-${layout.course.start}-${layout.course.end}-${layout.course.name}-${layout.x}-${layout.bg}-${layout.fg}`)
+                `${layout.course.day}-${layout.course.start}-${layout.course.end}-${layout.course.name}-${layout.x}-${layout.bg}-${layout.fg}-${layout.active ? 'a' : 'n'}`)
             }
             .layoutWeight(1)
             .height(CELL_H * 12 + BREAK_H * 2)
@@ -1598,6 +1759,17 @@ struct Index {
           }
           .width('100%')
           .padding({ left: 4, right: 8 })
+          .gesture(
+            PanGesture({ direction: PanDirection.Horizontal, distance: 20 })
+              .onActionEnd((event: GestureEvent) => {
+                // 左滑看下一周，右滑看上一周；阈值避免误触。
+                if (event.offsetX <= -50) {
+                  this.changeWeek(1);
+                } else if (event.offsetX >= 50) {
+                  this.changeWeek(-1);
+                }
+              })
+          )
         }
         .layoutWeight(1)
         .width('100%')
@@ -1893,7 +2065,7 @@ struct Index {
           .borderRadius(18)
           .margin({ top: 12 })
 
-          Text('版本 0.2.0 · 作者·凩新')
+          Text('版本 0.2.1 · 作者·凩新')
             .fontSize(10)
             .fontColor(this.theme.faint)
             .margin({ top: 18, bottom: 12 })

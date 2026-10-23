@@ -63,6 +63,7 @@ export struct NextClassBar {
   @Prop @Watch('onPropChange') syncing: boolean = false;
   @Prop @Watch('onPropChange') statusText: string = '';
   @Prop @Watch('onPropChange') hasSchedule: boolean = false;
+  @Prop @Watch('onPropChange') vacation: boolean = false;
   @Prop @Watch('onPropChange') statusJson: string = '';
 
   /** 点击正在上/下一节课那行时回调，参数用于定位今天对应的课程。 */
@@ -122,8 +123,10 @@ export struct NextClassBar {
       vm.title = '正在更新课表…';
     } else if (!this.hasSchedule) {
       vm.title = '尚未同步课表';
+    } else if (this.vacation) {
+      vm.title = '假期中';
     } else if (status.today.length === 0) {
-      vm.title = '今天没课，好好休息～';
+      vm.title = '今天没有课哦，好好享受假期吧！';
     } else {
       let current: ClassSlot | null = null;
       let next: ClassSlot | null = null;

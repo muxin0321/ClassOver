@@ -99,3 +99,20 @@ export function weekOfTerm(startDate: string, maxWeek: number, now: Date = new D
   }
   return week;
 }
+
+/**
+ * 学期是否已经结束：开学日期 + maxWeek 周之后的第二天起算假期。
+ * 日期无效或 maxWeek 非法时返回 false，宁可当作没结束。
+ */
+export function termEnded(startDate: string, maxWeek: number, now: Date = new Date()): boolean {
+  if (maxWeek <= 0) {
+    return false;
+  }
+  const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(startDate);
+  if (!match) {
+    return false;
+  }
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return today.getTime() >= start.getTime() + maxWeek * 7 * 86400000;
+}
