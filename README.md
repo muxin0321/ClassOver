@@ -36,7 +36,7 @@
 
 - ✅ 教务系统登录（账号 / 密码 / 验证码），凭证加密保存在系统 Asset Store
 - ✅ 自动登录、会话过期自动重登
-- ✅ 课表同步（强智教务系统，列表视图 + 网格视图双解析）
+- ✅ 课表同步（强智教务系统，个人课表列表解析）
 - ✅ 周课表原生网格：周切换、当前周校准、课程卡片、课程详情
 - ✅ 课表本地缓存，离线可查看
 - ✅ 校园服务快捷入口：
@@ -69,7 +69,7 @@
 
 ## 打开与运行
 
-1. 用 DevEco Studio 打开本目录 `ClassOver`。
+1. 用 DevEco Studio 打开仓库中的 `ClassOver` 目录。
 2. 等待工程同步（Sync）。
 3. 配置签名：
    - `File → Project Structure → Signing Configs`
@@ -90,6 +90,8 @@
 
 ## 目录结构
 
+以下路径相对于 `ClassOver/`：
+
 ```
 entry/src/main/ets/
   pages/Index.ets        # 主界面：课表 / 常用 / 我的 + 隐藏教务 Web
@@ -103,8 +105,12 @@ entry/src/main/ets/
   theme/Theme.ets            # 三套主题的浅色/深色色板与语义 token
   web/Scripts.ets            # 读取 rawfile 中的注入脚本
   web/JwxtWeb.ets            # 登录 / 会话 / 课表同步状态机
-entry/src/main/resources/rawfile/scripts/   # 教务页面 DOM 操作脚本
+entry/src/main/resources/rawfile/scripts/   # 当前使用的课表解析脚本
+docs/theme-preview.html                     # 配色预览页
+reserved/scripts/                           # 暂未接入的预留脚本
 ```
+
+仓库根目录另有 `README.md`、`LICENSE` 和 `.gitignore`。
 
 ## 实现说明
 
@@ -116,7 +122,7 @@ entry/src/main/resources/rawfile/scripts/   # 教务页面 DOM 操作脚本
 
 ## 真机调试
 
-- 构建状态：`hvigor` 编译通过，产物 `entry/build/default/outputs/default/entry-default-unsigned.hap`（约 503 KB）。
+- 构建状态：`hvigor` 编译通过，产物为 `entry/build/default/outputs/default/entry-default-unsigned.hap`。
 - 如果登录或课表同步失败，在 DevEco 的 Log 窗口过滤 `JwxtWeb`，可以看到类似：
   - `login state=ready captcha=true`
   - `login state=success`
@@ -132,7 +138,7 @@ entry/src/main/resources/rawfile/scripts/   # 教务页面 DOM 操作脚本
 ## 已知限制
 
 - **验证码必须手动输入**（学校系统本身也无法绕过）。
-- 学校网站改版可能导致解析失败；更新 `rawfile/scripts` 下的脚本即可。
+- 学校网站改版可能导致解析失败；更新 `ClassOver/entry/src/main/resources/rawfile/scripts` 下的脚本即可。
 - 大物实验报告系统只在校园网内开放。
 - 电费缴费页面由学校与 17wanxiao 官方提供；在纯血鸿蒙上唤起支付宝可能失败，
   此时可在页面内选择其他支付方式。
@@ -144,3 +150,8 @@ entry/src/main/resources/rawfile/scripts/   # 教务页面 DOM 操作脚本
 - 不收集、不上传任何数据。
 - 所有账号、课表、设置仅保存在本机。
 - 代码中不包含任何第三方统计或广告 SDK。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源，版权归 凩新 所有。
+

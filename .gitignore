@@ -1,15 +1,19 @@
 # 构建产物
 **/build/
 **/.hvigor/
+**/.cxx/
+**/.preview/
 **/oh_modules/
 **/node_modules/
 **/.idea/
+local.properties
 *.hap
 *.app
 
 # 系统 / 编辑器
 .DS_Store
 Thumbs.db
+*.iml
 
 # 本地素材（不上传 GitHub）
 /APK/
