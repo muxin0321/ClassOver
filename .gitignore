@@ -11,11 +11,5 @@
 .DS_Store
 Thumbs.db
 
-# 逆向分析素材（本地保留，不上传 GitHub）
-/APK/
-/analysis/
-/tools/
-/classover.jpg
-
 # 本地功能规划文档（不上传 GitHub）
 /功能规划.txt
