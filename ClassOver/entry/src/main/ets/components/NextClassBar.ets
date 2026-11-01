@@ -1,5 +1,6 @@
 import { DEFAULT_ENDS, DEFAULT_STARTS } from '../model/Schedule';
 import { themeFor } from '../theme/Theme';
+import { Motion } from '../theme/Motion';
 
 /** 一节课的最小描述，用于倒计时条。 */
 export class ClassSlot {
@@ -63,6 +64,7 @@ export struct NextClassBar {
   @Prop @Watch('onPropChange') syncing: boolean = false;
   @Prop @Watch('onPropChange') statusText: string = '';
   @Prop @Watch('onPropChange') hasSchedule: boolean = false;
+  @Prop @Watch('onPropChange') currentTerm: boolean = true;
   @Prop @Watch('onPropChange') vacation: boolean = false;
   @Prop @Watch('onPropChange') statusJson: string = '';
 
@@ -123,6 +125,8 @@ export struct NextClassBar {
       vm.title = '正在更新课表…';
     } else if (!this.hasSchedule) {
       vm.title = '尚未同步课表';
+    } else if (!this.currentTerm) {
+      vm.title = '历史学期课表';
     } else if (this.vacation) {
       vm.title = '假期中';
     } else if (status.today.length === 0) {
@@ -212,13 +216,16 @@ export struct NextClassBar {
               .borderRadius(1)
               .backgroundColor(this.vm.primarySoft)
             Row()
-              .width(`${Math.round(this.vm.progress * 100)}%`)
+              .width('100%')
               .height(2)
               .borderRadius(1)
+              .scale({ x: this.vm.progress, y: 1, centerX: 0 })
+              .animation({ duration: Motion.PROGRESS, curve: Motion.progress() })
               .backgroundColor(this.vm.primary)
           }
           .layoutWeight(1)
           .height(2)
+          .id(`progress-${this.vm.tapName}-${this.vm.tapStart}-${this.vm.tapEnd}`)
 
           Text(this.vm.progressText)
             .fontSize(10)

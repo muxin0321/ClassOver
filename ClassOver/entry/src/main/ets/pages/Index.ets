@@ -13,6 +13,7 @@ import { CredentialStore } from '../store/CredentialStore';
 import { Scripts } from '../web/Scripts';
 import { JwxtWeb, LoginCheck, JWXT_HOME, JWXT_LOGIN } from '../web/JwxtWeb';
 import { THEME_OPTIONS, ThemeOption, ThemePalette, themeFor, tint } from '../theme/Theme';
+import { Motion } from '../theme/Motion';
 
 const DOMAIN: number = 0x0002;
 const CELL_H: number = 42;
@@ -194,6 +195,12 @@ struct Index {
   @State currentWeek: number = 1;
   @State dayWidth: number = 0;
   @State layouts: CourseLayout[] = [];
+  @State gridWidth: number = 0;
+  @State dragX: number = 0;
+  @State peekLayouts: CourseLayout[] = [];
+  @State peekVisible: boolean = false;
+  @State peekSide: number = 0;
+  @State weekAnimating: boolean = false;
   @State status: string = '尚未同步课表';
   @State syncing: boolean = false;
   @State webReady: boolean = false;
@@ -220,9 +227,13 @@ struct Index {
   @State availableTerms: string[] = [];
   @State onVacation: boolean = false;
   @State nowMinute: number = 0;
+  @State liveWeek: number = 0;
+  @State tabDirection: number = 1;
 
   @State showSheet: boolean = false;
-  @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准
+  @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准, 4 跳转周
+  @State sheetIn: boolean = true;
+  @State sheetOpenSeq: number = 0;
   @State selectedCourse: Course | null = null;
 
   @State loginAccount: string = '';
@@ -252,6 +263,14 @@ struct Index {
   private silentAwaitToast: boolean = false;
   private pendingTermSync: string = '';
   private clockTimer: number = -1;
+  private dragActive: boolean = false;
+  private dragCancelled: boolean = false;
+  private weekGen: number = 0;
+  private transitionTarget: number = 0;
+  private pendingRebuild: boolean = false;
+  private prevWeekLayouts: CourseLayout[] = [];
+  private nextWeekLayouts: CourseLayout[] = [];
+  private lastWeekGestureAt: number = 0;
 
   private links: QuickLink[] = [
     new QuickLink('电费查询', '电量查询 · 在线缴费', $r('sys.symbol.bolt_1'), ELECTRICITY_URL, 'electricity', true),
@@ -355,6 +374,7 @@ struct Index {
       this.savedAccount = AppPrefs.getString('savedAccount', '');
       this.selectedTerm = AppPrefs.getString('selectedTerm', '');
       this.currentWeek = AppPrefs.getNumber('currentWeek', 1);
+      this.liveWeek = AppPrefs.getNumber('liveWeek', 0);
       this.themeId = AppPrefs.getString('themeId', 'D');
       this.colorMode = AppPrefs.getString('colorMode', 'auto');
       this.weekOverrideTerm = AppPrefs.getString('weekOverrideTerm', '');
@@ -485,6 +505,21 @@ struct Index {
     }
   }
 
+  /** 当前学期真正的本周；没有历史值时退回归档的校准周。 */
+  private effectiveLiveWeek(): number {
+    if (this.liveWeek > 0) {
+      return this.liveWeek;
+    }
+    const schedule = this.schedule;
+    if (schedule !== null && schedule.startDate !== '' && this.isLatestTerm()) {
+      const week = weekOfTerm(schedule.startDate, schedule.maxWeek);
+      if (week > 0) {
+        return week;
+      }
+    }
+    return Math.max(1, this.calibrationWeek);
+  }
+
   /**
    * 优先用缓存里的校历开始日期计算周次；没有缓存时再从学校公开校历读取。
    * 手动校准过的学期不覆盖用户设置，但仍记录自动周次供校准面板展示。
@@ -520,16 +555,25 @@ struct Index {
         return;
       }
       this.autoWeekValue = autoWeek;
+      if (this.isLatestTerm()) {
+        // liveWeek 始终表示当前学期真正的本周，供切换学期/回到本周使用。
+        this.liveWeek = autoWeek;
+        AppPrefs.setNumber('liveWeek', autoWeek);
+      } else {
+        // 旧学期的 weekOfTerm 会被钳制到最大周，不能拿来污染当前学期的本周。
+        return;
+      }
       if (this.weekOverrideTerm === schedule.term) {
         return;
       }
+      this.cancelWeekTransition();
       const wasOnCurrent = this.currentWeek === this.calibrationWeek;
       this.calibrationWeek = autoWeek;
       if (wasOnCurrent) {
         this.currentWeek = autoWeek;
       }
       AppPrefs.setNumber('currentWeek', autoWeek);
-      this.rebuildLayout();
+      this.rebuildLayout(true);
       this.updateTodayStatus();
       this.refreshVacation();
     } finally {
@@ -545,8 +589,9 @@ struct Index {
     const systemDark = this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
     const dark = this.colorMode === 'dark' || (this.colorMode === 'auto' && systemDark);
     this.theme = themeFor(this.themeId, dark);
-    // 课程卡片颜色缓存在 layouts 里，换主题后必须重算。
-    this.rebuildLayout();
+    // 课程卡片颜色缓存在 layouts 里，换主题后必须重算；动画中也要立即重算。
+    this.cancelWeekTransition();
+    this.rebuildLayout(true);
     this.applySystemBars();
   }
 
@@ -626,12 +671,28 @@ struct Index {
   private openSheet(kind: number): void {
     this.sheetKind = kind;
     if (!this.showSheet) {
+      // 每次重新打开都让内容重新挂载，触发一次入场动画。
+      this.sheetOpenSeq = this.sheetOpenSeq + 1;
+      this.sheetIn = false;
       this.showSheet = true;
     }
   }
 
   private closeSheet(): void {
     this.showSheet = false;
+  }
+
+  private switchTab(index: number): void {
+    if (index === this.currentTab) {
+      return;
+    }
+    if (this.currentTab === 0) {
+      // 离开课表页前收掉未完成的周切换，避免回来时停在半程。
+      this.cancelWeekTransition();
+    }
+    // 先记方向再切页，保证入场节点拿到的是最新方向。
+    this.tabDirection = index > this.currentTab ? 1 : -1;
+    this.currentTab = index;
   }
 
   private async syncNow(auto: boolean, silent: boolean = false): Promise<void> {
@@ -814,6 +875,7 @@ struct Index {
         this.schedule = schedule;
         this.selectedTerm = schedule.term;
         this.applyTerms(outcome.terms);
+        this.cancelWeekTransition();
         const maxWeek = Math.max(1, schedule.maxWeek);
         this.currentWeek = Math.min(Math.max(1, this.currentWeek), maxWeek);
         this.calibrationWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
@@ -823,7 +885,7 @@ struct Index {
         }
         await AppPrefs.setString('selectedTerm', schedule.term);
         this.status = `本地课表 · 更新于 ${formatStamp(schedule.savedAt)}`;
-        this.rebuildLayout();
+        this.rebuildLayout(true);
         this.updateTodayStatus();
         this.refreshVacation();
         this.refreshAutoWeek();
@@ -1080,12 +1142,11 @@ struct Index {
     return offset;
   }
 
-  private rebuildLayout(): void {
+  private computeLayouts(week: number): CourseLayout[] {
     if (this.schedule === null || this.dayWidth <= 0) {
-      this.layouts = [];
-      return;
+      return [];
     }
-    const visible = this.schedule.at(this.currentWeek);
+    const visible = this.schedule.at(week);
     const counts: Map<string, number> = new Map();
     for (let i = 0; i < visible.length; i++) {
       const course = visible[i];
@@ -1110,7 +1171,7 @@ struct Index {
       layout.h = bottom - top - 2;
       const palette = this.theme.courses[colorIndex(course.name, this.theme.courses.length)];
       layout.fg = palette.fg;
-      layout.active = this.isCourseActive(course);
+      layout.active = this.isCourseActive(course, week);
       if (layout.active) {
         // 浅色主题加深、深色主题提亮，配合 2vp 边框突出正在上的课。
         layout.bg = blendColor(palette.bg, this.theme.dark ? '#FFFFFF' : '#000000',
@@ -1120,20 +1181,268 @@ struct Index {
       }
       result.push(layout);
     }
-    this.layouts = result;
+    return result;
+  }
+
+  private rebuildLayout(force: boolean = false): void {
+    if (!force && (this.dragActive || this.weekAnimating)) {
+      // 动画期间整体替换卡片会闪断，推迟到动画收尾后再重建。
+      this.pendingRebuild = true;
+      return;
+    }
+    this.layouts = this.computeLayouts(this.currentWeek);
+  }
+
+  private flushPendingRebuild(): void {
+    if (this.pendingRebuild) {
+      this.pendingRebuild = false;
+      this.rebuildLayout(true);
+    }
+  }
+
+  private courseKey(layout: CourseLayout): string {
+    return `${layout.course.day}-${layout.course.start}-${layout.course.end}-${layout.course.name}-` +
+      `${layout.x}-${layout.bg}-${layout.fg}-${layout.active ? 'a' : 'n'}`;
+  }
+
+  private handleGridAreaChange(area: Area): void {
+    const width = Number.parseFloat(area.width.toString());
+    if (!Number.isFinite(width) || width <= 0) {
+      return;
+    }
+    if (Math.abs(width - this.gridWidth) > 0.5) {
+      if (this.dragActive || this.weekAnimating) {
+        this.cancelWeekTransition();
+      }
+      this.gridWidth = width;
+    }
+    const nextWidth = width / 7;
+    if (Number.isFinite(nextWidth) && Math.abs(nextWidth - this.dayWidth) > 0.5) {
+      this.dayWidth = nextWidth;
+      this.rebuildLayout(true);
+    }
+  }
+
+  /** 新手势/新跳转到来时，直接收掉正在跑的吸附动画，避免“滑了没反应”。 */
+  private finishActiveWeekTransition(): void {
+    if (!this.weekAnimating) {
+      return;
+    }
+    this.weekGen = this.weekGen + 1;
+    if (this.transitionTarget > 0) {
+      this.finishWeekSlide();
+    } else {
+      this.cancelWeekTransition();
+    }
+  }
+
+  /** 程序化切周：当前周与目标周两层卡片一起平移，动画结束后提交。 */
+  private startWeekSlide(target: number): void {
+    if (this.schedule === null || this.dragActive) {
+      return;
+    }
+    if (this.weekAnimating) {
+      this.finishActiveWeekTransition();
+    }
+    const maxWeek = Math.max(1, this.schedule.maxWeek);
+    const next = Math.min(Math.max(1, target), maxWeek);
+    if (next === this.currentWeek) {
+      return;
+    }
+    if (this.onVacation || this.gridWidth <= 0) {
+      this.applyWeekImmediately(next);
+      return;
+    }
+    const side = next > this.currentWeek ? 1 : -1;
+    this.peekLayouts = this.computeLayouts(next);
+    this.peekVisible = true;
+    this.peekSide = side;
+    this.transitionTarget = next;
+    this.weekAnimating = true;
+    this.weekGen = this.weekGen + 1;
+    const gen = this.weekGen;
+    this.getUIContext().animateTo({
+      curve: Motion.weekSettle(),
+      onFinish: () => {
+        if (gen === this.weekGen) {
+          this.finishWeekSlide();
+        }
+      }
+    }, () => {
+      this.dragX = (0 - side) * this.gridWidth;
+    });
+  }
+
+  private finishWeekSlide(): void {
+    const target = this.transitionTarget;
+    if (target < 1) {
+      this.settleBack();
+      return;
+    }
+    this.currentWeek = target;
+    this.layouts = this.peekLayouts;
+    this.dragX = 0;
+    this.peekVisible = false;
+    this.peekLayouts = [];
+    this.peekSide = 0;
+    this.transitionTarget = 0;
+    this.weekAnimating = false;
+    this.dragActive = false;
+    this.flushPendingRebuild();
+  }
+
+  private settleBack(): void {
+    this.weekGen = this.weekGen + 1;
+    const gen = this.weekGen;
+    this.weekAnimating = true;
+    this.getUIContext().animateTo({
+      curve: Motion.weekBounce(),
+      onFinish: () => {
+        if (gen !== this.weekGen) {
+          return;
+        }
+        this.dragX = 0;
+        this.peekVisible = false;
+        this.peekLayouts = [];
+        this.peekSide = 0;
+        this.transitionTarget = 0;
+        this.weekAnimating = false;
+        this.dragActive = false;
+        this.flushPendingRebuild();
+      }
+    }, () => {
+      this.dragX = 0;
+    });
+  }
+
+  private cancelWeekTransition(): void {
+    if (!this.weekAnimating && !this.dragActive && this.dragX === 0 && !this.peekVisible) {
+      return;
+    }
+    this.weekGen = this.weekGen + 1;
+    this.getUIContext().animateTo({ duration: 0 }, () => {
+      this.dragX = 0;
+      this.peekVisible = false;
+      this.peekLayouts = [];
+      this.peekSide = 0;
+      this.transitionTarget = 0;
+      this.weekAnimating = false;
+      this.dragActive = false;
+    });
+    this.flushPendingRebuild();
+  }
+
+  private applyWeekImmediately(week: number): void {
+    this.cancelWeekTransition();
+    this.currentWeek = week;
+    this.rebuildLayout(true);
+  }
+
+  private onWeekPanStart(): void {
+    this.lastWeekGestureAt = Date.now();
+    if (this.schedule === null || this.onVacation || this.gridWidth <= 0) {
+      this.dragCancelled = true;
+      return;
+    }
+    if (this.weekAnimating) {
+      // 上一段吸附还没结束就再次滑动：立刻落定，再按新手势继续。
+      this.finishActiveWeekTransition();
+    }
+    this.dragCancelled = false;
+    this.dragActive = true;
+    this.peekVisible = false;
+    this.peekLayouts = [];
+    this.peekSide = 0;
+    this.transitionTarget = 0;
+    const maxWeek = Math.max(1, this.schedule.maxWeek);
+    this.prevWeekLayouts = this.currentWeek > 1 ? this.computeLayouts(this.currentWeek - 1) : [];
+    this.nextWeekLayouts = this.currentWeek < maxWeek ? this.computeLayouts(this.currentWeek + 1) : [];
+  }
+
+  private onWeekPanUpdate(offsetX: number, offsetY: number): void {
+    if (this.dragCancelled || !this.dragActive) {
+      return;
+    }
+    // 纵向意图优先交还给 Scroll，不误判成翻周。
+    if (Math.abs(offsetY) > Math.abs(offsetX) + 8) {
+      this.dragCancelled = true;
+      this.dragX = 0;
+      this.peekVisible = false;
+      this.peekLayouts = [];
+      this.transitionTarget = 0;
+      return;
+    }
+    if (Math.abs(offsetX) < 2) {
+      return;
+    }
+    const side = offsetX < 0 ? 1 : -1;
+    if (side !== this.peekSide) {
+      this.peekSide = side;
+      const target = this.currentWeek + side;
+      const maxWeek = this.schedule === null ? 1 : Math.max(1, this.schedule.maxWeek);
+      const hasTarget = target >= 1 && target <= maxWeek;
+      this.peekLayouts = hasTarget ? (side > 0 ? this.nextWeekLayouts : this.prevWeekLayouts) : [];
+      this.peekVisible = hasTarget;
+      this.transitionTarget = hasTarget ? target : 0;
+    }
+    if (this.transitionTarget === 0) {
+      const limit = this.gridWidth * Motion.EDGE_MAX_RATIO;
+      this.dragX = Math.max(0 - limit, Math.min(limit, offsetX * Motion.EDGE_DAMP));
+    } else {
+      this.dragX = Math.max(0 - this.gridWidth, Math.min(this.gridWidth, offsetX));
+    }
+  }
+
+  private onWeekPanEnd(offsetX: number, velocityX: number): void {
+    if (this.dragCancelled) {
+      this.dragCancelled = false;
+      this.dragActive = false;
+      return;
+    }
+    if (!this.dragActive) {
+      return;
+    }
+    const width = this.gridWidth;
+    const distanceCommit = Math.abs(offsetX) >= width * Motion.COMMIT_RATIO;
+    const velocityCommit = Math.abs(velocityX) >= Motion.FLING_VELOCITY &&
+      ((velocityX < 0 && this.peekSide > 0) || (velocityX > 0 && this.peekSide < 0));
+    if (this.transitionTarget > 0 && (distanceCommit || velocityCommit)) {
+      const side = this.peekSide;
+      this.weekGen = this.weekGen + 1;
+      const gen = this.weekGen;
+      this.weekAnimating = true;
+      this.getUIContext().animateTo({
+        curve: Motion.weekSettle(),
+        onFinish: () => {
+          if (gen === this.weekGen) {
+            this.finishWeekSlide();
+          }
+        }
+      }, () => {
+        this.dragX = (0 - side) * width;
+      });
+    } else {
+      this.settleBack();
+    }
+  }
+
+  private onWeekPanCancel(): void {
+    if (!this.dragActive) {
+      return;
+    }
+    this.dragCancelled = false;
+    this.settleBack();
   }
 
   private changeWeek(delta: number): void {
     if (this.schedule === null) {
       return;
     }
-    const next = this.currentWeek + delta;
-    if (next < 1 || next > this.schedule.maxWeek) {
-      return;
+    if (this.weekAnimating) {
+      this.finishActiveWeekTransition();
     }
     // 只切换当前浏览的周，不改变“真实本周”的校准值。
-    this.currentWeek = next;
-    this.rebuildLayout();
+    this.startWeekSlide(this.currentWeek + delta);
   }
 
   /** 学校页面给出的可选学期列表，同步成功后缓存在本机（只保留最近四个学年）。 */
@@ -1198,21 +1507,21 @@ struct Index {
       return;
     }
     const maxWeek = Math.max(1, this.schedule.maxWeek);
-    this.currentWeek = Math.min(Math.max(1, this.sheetWeek), maxWeek);
-    this.rebuildLayout();
+    const target = Math.min(Math.max(1, this.sheetWeek), maxWeek);
     this.closeSheet();
+    this.startWeekSlide(target);
   }
 
-  /** 一键回到真实本周（校准周），不改变校准值本身。 */
+  /** 一键回到当前学期的真实本周，不改变校准值本身。 */
   private goToCurrentWeek(): void {
     if (this.schedule === null) {
       this.closeSheet();
       return;
     }
     const maxWeek = Math.max(1, this.schedule.maxWeek);
-    this.currentWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
-    this.rebuildLayout();
+    const target = Math.min(Math.max(1, this.effectiveLiveWeek()), maxWeek);
     this.closeSheet();
+    this.startWeekSlide(target);
   }
 
   /** 切换学期：先用本地缓存秒开；没有缓存就显示空课表等待。 */
@@ -1227,23 +1536,27 @@ struct Index {
     this.closeSheet();
     this.selectedTerm = term;
     await AppPrefs.setString('selectedTerm', term);
+    this.cancelWeekTransition();
     if (this.store !== null) {
       const cached = this.store.load(term);
       if (cached !== null) {
         this.schedule = cached;
         const maxWeek = Math.max(1, cached.maxWeek);
-        this.currentWeek = Math.min(Math.max(1, this.currentWeek), maxWeek);
-        this.calibrationWeek = Math.min(Math.max(1, this.calibrationWeek), maxWeek);
+        // 切换到任何学期都先落在当前学期的真实本周（旧学期按自身周数上限裁剪）。
+        const targetWeek = Math.min(Math.max(1, this.effectiveLiveWeek()), maxWeek);
+        this.currentWeek = targetWeek;
+        this.calibrationWeek = targetWeek;
         this.status = cached.savedAt
           ? `本地课表 · 上次更新 ${formatStamp(cached.savedAt)}` : '本地课表';
-        this.rebuildLayout();
+        this.rebuildLayout(true);
         this.updateTodayStatus();
       } else {
         // 没有该学期的本地缓存：清掉旧学期课表，空课表等待同步。
+        const targetWeek = Math.max(1, this.effectiveLiveWeek());
         this.schedule = null;
         this.layouts = [];
-        this.currentWeek = 1;
-        this.calibrationWeek = 1;
+        this.currentWeek = targetWeek;
+        this.calibrationWeek = targetWeek;
         this.status = '正在获取该学期课表…';
         this.updateTodayStatus();
       }
@@ -1261,14 +1574,17 @@ struct Index {
     await this.syncNow(false);
   }
 
-  /** 只有浏览的周正好是校准出来的本周时，才高亮今天。 */
+  /** 只有最新学期、浏览周正好是校准本周时，才高亮今天。 */
   private isTodayColumn(day: number): boolean {
-    return this.currentWeek === this.calibrationWeek && this.todayDay === day;
+    return this.isLatestTerm() && this.currentWeek === this.calibrationWeek && this.todayDay === day;
   }
 
-  /** 当前时间是否正在上这门课（只对真实本周的今天生效）。 */
-  private isCourseActive(course: Course): boolean {
-    if (!this.isTodayColumn(course.day) || !course.hasWeek(this.calibrationWeek)) {
+  /** 指定周是否正在上这门课；默认按当前浏览周判断。 */
+  private isCourseActive(course: Course, week: number = this.currentWeek): boolean {
+    if (!this.isLatestTerm() || week !== this.calibrationWeek || this.todayDay !== course.day) {
+      return false;
+    }
+    if (!course.hasWeek(this.calibrationWeek)) {
       return false;
     }
     const start = hhmmToMinutes(DEFAULT_STARTS[course.start - 1]);
@@ -1279,10 +1595,9 @@ struct Index {
   private setCurrentWeek(): void {
     this.weekOverrideTerm = this.schedule !== null ? this.schedule.term : '';
     AppPrefs.setString('weekOverrideTerm', this.weekOverrideTerm);
-    this.currentWeek = this.calibrationWeek;
     AppPrefs.setNumber('currentWeek', this.calibrationWeek);
     this.closeSheet();
-    this.rebuildLayout();
+    this.startWeekSlide(this.calibrationWeek);
     this.updateTodayStatus();
     this.toast(`已将第 ${this.calibrationWeek} 周设为本周 · 手动校准`);
   }
@@ -1292,8 +1607,9 @@ struct Index {
     await AppPrefs.setString('weekOverrideTerm', '');
     await this.refreshAutoWeek();
     if (this.autoWeekValue > 0) {
+      this.cancelWeekTransition();
       this.currentWeek = this.autoWeekValue;
-      this.rebuildLayout();
+      this.rebuildLayout(true);
       this.updateTodayStatus();
       this.toast(`已恢复自动计算：第 ${this.autoWeekValue} 周`);
     } else {
@@ -1352,16 +1668,19 @@ struct Index {
       SymbolGlyph(symbol)
         .fontSize(22)
         .fontColor([this.currentTab === index ? this.theme.primary : this.theme.muted])
+        .animation({ duration: Motion.TAB, curve: Motion.easeOut() })
       Text(label)
         .fontSize(11)
         .fontColor(this.currentTab === index ? this.theme.primary : this.theme.muted)
+        .animation({ duration: Motion.TAB, curve: Motion.easeOut() })
         .margin({ top: 2 })
     }
     .layoutWeight(1)
     .height(52)
     .justifyContent(FlexAlign.Center)
+    .clickEffect({ level: ClickEffectLevel.LIGHT, scale: 0.94 })
     .onClick(() => {
-      this.currentTab = index;
+      this.switchTab(index);
     })
   }
 
@@ -1513,6 +1832,8 @@ struct Index {
     }
     .width('100%')
     .padding({ left: 4, right: 8 })
+    .opacity(this.onVacation ? 0 : 1)
+    .animation({ duration: Motion.FAST, curve: Motion.easeOut() })
   }
 
   @Builder TimeColumn() {
@@ -1650,7 +1971,13 @@ struct Index {
     .borderRadius(8)
     .position({ x: layout.x, y: layout.y })
     .zIndex(2)
+    .clickEffect({ level: ClickEffectLevel.LIGHT, scale: 0.96 })
     .onClick(() => {
+      // 横向滑动刚结束时不要误开课程详情。
+      if (this.dragActive || this.weekAnimating ||
+        Date.now() - this.lastWeekGestureAt < 300) {
+        return;
+      }
       this.selectedCourse = layout.course;
       this.openSheet(2);
     })
@@ -1692,9 +2019,13 @@ struct Index {
       }
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ bottom: 40 })
+    .transition(TransitionEffect.OPACITY
+      .combine(TransitionEffect.scale({ x: 0.98, y: 0.98 }))
+      .animation({ duration: Motion.FAST, curve: Motion.easeOut() }))
+    .id('schedule-empty')
   }
 
   @Builder HolidayView() {
@@ -1707,9 +2038,13 @@ struct Index {
         .padding({ left: 32, right: 32 })
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ bottom: 40 })
+    .transition(TransitionEffect.OPACITY
+      .combine(TransitionEffect.scale({ x: 0.98, y: 0.98 }))
+      .animation({ duration: Motion.FAST, curve: Motion.easeOut() }))
+    .id('schedule-holiday')
   }
 
   @Builder ScheduleView() {
@@ -1721,6 +2056,7 @@ struct Index {
         syncing: this.syncing,
         statusText: this.status,
         hasSchedule: this.schedule !== null,
+        currentTerm: this.isLatestTerm(),
         vacation: this.onVacation,
         statusJson: this.statusJson,
         onTapCourse: (name: string, room: string, start: number, end: number) => {
@@ -1728,57 +2064,84 @@ struct Index {
         }
       })
       this.WeekBar()
-      if (!this.onVacation) {
-        this.DayHeader()
-      }
-      if (this.schedule === null) {
-        this.EmptySchedule()
-      } else if (this.onVacation) {
-        this.HolidayView()
-      } else {
-        Scroll() {
-          Row() {
-            this.TimeColumn()
-            Stack() {
-              this.GridBackground()
-              ForEach(this.layouts, (layout: CourseLayout) => {
-                this.CourseCard(layout)
-              }, (layout: CourseLayout) =>
-                `${layout.course.day}-${layout.course.start}-${layout.course.end}-${layout.course.name}-${layout.x}-${layout.bg}-${layout.fg}-${layout.active ? 'a' : 'n'}`)
-            }
-            .layoutWeight(1)
-            .height(CELL_H * 12 + BREAK_H * 2)
-            .onAreaChange((oldArea: Area, newArea: Area) => {
-              const width = Number.parseFloat(newArea.width.toString());
-              const nextWidth = width / 7;
-              if (Number.isFinite(nextWidth) && Math.abs(nextWidth - this.dayWidth) > 0.5) {
-                this.dayWidth = nextWidth;
-                this.rebuildLayout();
+      this.DayHeader()
+      Stack() {
+        if (this.schedule === null) {
+          this.EmptySchedule()
+        } else if (this.onVacation) {
+          this.HolidayView()
+        } else {
+          Scroll() {
+            Row() {
+              this.TimeColumn()
+              Stack() {
+                this.GridBackground()
+                Stack() {
+                  ForEach(this.layouts, (layout: CourseLayout) => {
+                    this.CourseCard(layout)
+                  }, (layout: CourseLayout) => this.courseKey(layout))
+                }
+                .width('100%')
+                .height(CELL_H * 12 + BREAK_H * 2)
+                .translate({ x: this.dragX })
+
+                if (this.peekVisible) {
+                  Stack() {
+                    ForEach(this.peekLayouts, (layout: CourseLayout) => {
+                      this.CourseCard(layout)
+                    }, (layout: CourseLayout) => this.courseKey(layout))
+                  }
+                  .width('100%')
+                  .height(CELL_H * 12 + BREAK_H * 2)
+                  .translate({ x: this.dragX + this.peekSide * this.gridWidth })
+                  .hitTestBehavior(HitTestMode.None)
+                }
               }
-            })
+              .layoutWeight(1)
+              .height(CELL_H * 12 + BREAK_H * 2)
+              .clip(true)
+              .onAreaChange((oldArea: Area, newArea: Area) => {
+                this.handleGridAreaChange(newArea);
+              })
+              .gesture(
+                PanGesture({ direction: PanDirection.Horizontal, distance: Motion.PAN_DISTANCE })
+                  .onActionStart(() => {
+                    this.onWeekPanStart();
+                  })
+                  .onActionUpdate((event: GestureEvent) => {
+                    this.onWeekPanUpdate(event.offsetX, event.offsetY);
+                  })
+                  .onActionEnd((event: GestureEvent) => {
+                    this.onWeekPanEnd(event.offsetX, event.velocityX);
+                  })
+                  .onActionCancel(() => {
+                    this.onWeekPanCancel();
+                  })
+              )
+            }
+            .width('100%')
+            .padding({ left: 4, right: 8 })
           }
           .width('100%')
-          .padding({ left: 4, right: 8 })
-          .gesture(
-            PanGesture({ direction: PanDirection.Horizontal, distance: 20 })
-              .onActionEnd((event: GestureEvent) => {
-                // 左滑看下一周，右滑看上一周；阈值避免误触。
-                if (event.offsetX <= -50) {
-                  this.changeWeek(1);
-                } else if (event.offsetX >= 50) {
-                  this.changeWeek(-1);
-                }
-              })
-          )
+          .height('100%')
+          .scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring)
+          .transition(TransitionEffect.OPACITY.animation({ duration: Motion.FAST, curve: Motion.easeOut() }))
+          .id('schedule-grid')
         }
-        .layoutWeight(1)
-        .width('100%')
-        .scrollBar(BarState.Off)
-        .edgeEffect(EdgeEffect.Spring)
       }
+      .width('100%')
+      .layoutWeight(1)
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
+        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
+      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
+    ))
+    .id('tab-schedule')
   }
 
   @Builder CommonView() {
@@ -1867,7 +2230,14 @@ struct Index {
       .scrollBar(BarState.Off)
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
+        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
+      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
+    ))
+    .id('tab-common')
   }
 
   @Builder ProfileView() {
@@ -2065,7 +2435,7 @@ struct Index {
           .borderRadius(18)
           .margin({ top: 12 })
 
-          Text('版本 0.2.1 · 作者·凩新')
+          Text('版本 0.3.0 · 作者·凩新')
             .fontSize(10)
             .fontColor(this.theme.faint)
             .margin({ top: 18, bottom: 12 })
@@ -2077,7 +2447,14 @@ struct Index {
       .scrollBar(BarState.Off)
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.OPACITY
+        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
+        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
+      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
+    ))
+    .id('tab-profile')
   }
 
   @Builder ModeChip(label: string, mode: string) {
@@ -2292,6 +2669,13 @@ struct Index {
     .width('100%')
     .padding({ left: 20, right: 20, top: 18, bottom: 24 })
     .backgroundColor(this.theme.card)
+    .opacity(this.sheetIn ? 1 : Motion.SHEET_MIN_OPACITY)
+    .translate({ y: this.sheetIn ? 0 : Motion.SHEET_OFFSET })
+    .animation({ duration: Motion.SHEET_IN, curve: Motion.easeOut() })
+    .onAppear(() => {
+      this.sheetIn = true;
+    })
+    .id(`sheet-content-${this.sheetOpenSeq}`)
   }
 
   @Builder CourseDetailSheet() {
@@ -2342,6 +2726,13 @@ struct Index {
     .width('100%')
     .padding({ left: 20, right: 20, top: 18, bottom: 24 })
     .backgroundColor(this.theme.card)
+    .opacity(this.sheetIn ? 1 : Motion.SHEET_MIN_OPACITY)
+    .translate({ y: this.sheetIn ? 0 : Motion.SHEET_OFFSET })
+    .animation({ duration: Motion.SHEET_IN, curve: Motion.easeOut() })
+    .onAppear(() => {
+      this.sheetIn = true;
+    })
+    .id(`sheet-content-${this.sheetOpenSeq}`)
   }
 
   @Builder DetailRow(label: string, value: string) {
@@ -2437,6 +2828,13 @@ struct Index {
     .width('100%')
     .padding({ left: 20, right: 20, top: 20, bottom: 24 })
     .backgroundColor(this.theme.card)
+    .opacity(this.sheetIn ? 1 : Motion.SHEET_MIN_OPACITY)
+    .translate({ y: this.sheetIn ? 0 : Motion.SHEET_OFFSET })
+    .animation({ duration: Motion.SHEET_IN, curve: Motion.easeOut() })
+    .onAppear(() => {
+      this.sheetIn = true;
+    })
+    .id(`sheet-content-${this.sheetOpenSeq}`)
   }
 
   @Builder WeekPickerSheet() {
@@ -2573,6 +2971,13 @@ struct Index {
     .width('100%')
     .padding({ left: 20, right: 20, top: 20, bottom: 20 })
     .backgroundColor(this.theme.card)
+    .opacity(this.sheetIn ? 1 : Motion.SHEET_MIN_OPACITY)
+    .translate({ y: this.sheetIn ? 0 : Motion.SHEET_OFFSET })
+    .animation({ duration: Motion.SHEET_IN, curve: Motion.easeOut() })
+    .onAppear(() => {
+      this.sheetIn = true;
+    })
+    .id(`sheet-content-${this.sheetOpenSeq}`)
   }
 
   @Builder ActiveSheet() {
@@ -2590,13 +2995,19 @@ struct Index {
   build() {
     Stack() {
       Column() {
-        if (this.currentTab === 0) {
-          this.ScheduleView()
-        } else if (this.currentTab === 1) {
-          this.CommonView()
-        } else {
-          this.ProfileView()
+        Stack() {
+          if (this.currentTab === 0) {
+            this.ScheduleView()
+          } else if (this.currentTab === 1) {
+            this.CommonView()
+          } else {
+            this.ProfileView()
+          }
         }
+        .width('100%')
+        .layoutWeight(1)
+        .alignContent(Alignment.TopStart)
+
         this.BottomBar()
       }
       .width('100%')
