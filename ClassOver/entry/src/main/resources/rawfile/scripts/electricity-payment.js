@@ -9,7 +9,7 @@
     var integerOnly=!!(field('amountToInt') && field('amountToInt').value==='1');
     if(action==='inspect')return {ready:ready,integerOnly:integerOnly};
     if(action!=='pay'||!ready||!data)return {submitted:false,message:'学校缴费页面未就绪，请重新登录后重试'};
-    if(window.__sanjiaohuPaymentSubmitted)return {submitted:false,message:'本次支付已发起，请勿重复提交'};
+    if(window.__classoverPaymentSubmitted)return {submitted:false,message:'本次支付已发起，请勿重复提交'};
     if(!/^[A-Za-z0-9-]{1,160}$/.test(data.room)||typeof data.description!=='string'||data.description.length>600||!/^[0-9]{1,5}\.[0-9]{2}$/.test(data.amount))return {submitted:false,message:'房间或金额无效'};
     var money=Number(data.amount);
     if(money<0.01||money>99999||(integerOnly&&(money<10||money>200||money%1!==0)))return {submitted:false,message:'金额不符合学校要求'};
@@ -39,7 +39,7 @@
             return original.call(window.epaySdk,prepared,source);
         };
     }
-    window.__sanjiaohuPaymentSubmitted=true;
+    window.__classoverPaymentSubmitted=true;
     // Keep the school's validation, confirmation, current cashier SDK and session.
     button.click();
     return {submitted:true};

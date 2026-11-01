@@ -1,7 +1,7 @@
 (function(job,requested,parser){
   'use strict';
-  var state=window.__sanjiaohuExamJob;
-  if(!state||state.id!==job)state=window.__sanjiaohuExamJob={id:job,phase:'menu',target:parser.term(requested),terms:[],entries:[],seen:{},index:0};
+  var state=window.__classoverExamJob;
+  if(!state||state.id!==job)state=window.__classoverExamJob={id:job,phase:'menu',target:parser.term(requested),terms:[],entries:[],seen:{},index:0};
   function documents(d,depth,out){out.push(d);if(depth<6)Array.from(d.querySelectorAll('iframe,frame')).forEach(function(f){try{if(f.contentDocument)documents(f.contentDocument,depth+1,out);}catch(e){}});return out;}
   var docs=documents(document,0,[]);
   function result(data){data.terms=state.terms;if(state.target)data.selectedTerm=state.target.label;return data;}

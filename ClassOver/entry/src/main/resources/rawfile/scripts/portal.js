@@ -1,7 +1,7 @@
 (function (job, kind, requested, parser) {
   'use strict';
-  var state=window.__sanjiaohuJob;
-  if(!state || state.id!==job)state=window.__sanjiaohuJob={id:job,phase:kind==='summary'?'grades-menu':'schedule-menu',target:parser.term(requested),terms:[]};
+  var state=window.__classoverJob;
+  if(!state || state.id!==job)state=window.__classoverJob={id:job,phase:kind==='summary'?'grades-menu':'schedule-menu',target:parser.term(requested),terms:[]};
   function documents(doc,depth,out){
     out.push(doc);
     if(depth<5)Array.from(doc.querySelectorAll('iframe,frame')).forEach(function(frame){try{if(frame.contentDocument)documents(frame.contentDocument,depth+1,out);}catch(ignored){}});

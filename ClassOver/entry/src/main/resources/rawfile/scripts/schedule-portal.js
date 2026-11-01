@@ -1,7 +1,7 @@
 (function(job,requested,parser){
   'use strict';
-  var state=window.__sanjiaohuListJob;
-  if(!state||state.id!==job)state=window.__sanjiaohuListJob={id:job,phase:'menu',target:parser.term(requested),terms:[]};
+  var state=window.__classoverListJob;
+  if(!state||state.id!==job)state=window.__classoverListJob={id:job,phase:'menu',target:parser.term(requested),terms:[]};
   var docs=parser.documents(document);
   function result(data){data.terms=state.terms;if(state.target)data.selectedTerm=state.target.label;return data;}
   function wait(stage){return result({error:'waiting',stage:stage});}

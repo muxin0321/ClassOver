@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 
 /**
- * 原 App 的注入脚本，静态打包在 rawfile/scripts 下。
+ * 教务页面注入脚本，静态打包在 rawfile/scripts 下。
  * 这些脚本只操作学校页面 DOM，不包含任何账号信息。
  */
 export class Scripts {

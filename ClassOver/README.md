@@ -2,11 +2,9 @@
 
 当前版本：**0.2.1**
 
-江汉大学课表与校园服务入口的 **HarmonyOS 原生应用**，个人自用。
+江汉大学课表与校园服务入口的 **HarmonyOS 原生应用**，个人项目。
 
-> 本项目参考了对「三角狐」Android 版（`cn.jhun.sanjiaohu` v1.1.0）的逆向分析结果，
-> 用 ArkTS / ArkUI 重新实现，未复制其图标、美术资源或品牌名称。
-> 非官方应用，仅用于查看自己的课表和进入学校常用网站。
+> 非官方应用，仅用于查看自己的课表与进入学校常用网站。
 
 ## 验证状态
 
@@ -16,7 +14,7 @@
 
 - **DevEco 预览器不支持 ArkWeb**：`onControllerAttached` 在预览器中是 mock，会报 `undefined is not callable`。必须用模拟器或真机。
 - **隐藏 Web 不能太小**：10×10 的隐藏 Web 在 ArkWeb 中不会发起导航。已改为全屏 1% 透明层 + `hitTestBehavior(None)`。
-- **原版登录脚本在 ArkWeb 下误判**：`login-state.js` 的 `location.origin` 校验会返回 `unsupported`，导致反复重载登录页。已改为在 `JwxtWeb.ets` 中直接探测并提交登录表单。
+- **登录页脚本在 ArkWeb 下可能误判**：学校登录页脚本里的 `location.origin` 校验在部分导航过程中会返回 `unsupported`，导致反复重载登录页。已改为在 `JwxtWeb.ets` 中直接探测并提交登录表单。
 - **一个组件只能有一个 `bindSheet`**：多个 sheet 会互相干扰，导致登录面板弹出后立刻消失。已合并为单个 sheet。
 - **域名白名单**：放行全部 `*.jhun.edu.cn`，否则登录重定向可能被拦截。
 
@@ -105,13 +103,13 @@ entry/src/main/ets/
   theme/Theme.ets            # 三套主题的浅色/深色色板与语义 token
   web/Scripts.ets            # 读取 rawfile 中的注入脚本
   web/JwxtWeb.ets            # 登录 / 会话 / 课表同步状态机
-entry/src/main/resources/rawfile/scripts/   # 从原 APK 移植的 DOM 操作脚本
+entry/src/main/resources/rawfile/scripts/   # 教务页面 DOM 操作脚本
 ```
 
 ## 实现说明
 
 - 教务系统的登录与课表抓取在**隐藏的 ArkWeb 组件**中完成，UI 是纯原生 ArkUI。
-- 注入脚本沿用原 App 的解析逻辑，只操作学校页面的 DOM，不包含账号信息。
+- 注入脚本只操作学校页面的 DOM，不包含账号信息。
 - 登录凭证通过 `@kit.AssetStoreKit` 保存，由系统密钥保护，不以明文写入应用沙箱。
 - 课表缓存为应用沙箱内的 JSON 文件（`schedule-<学年>.json`），不上传任何服务器。
 - 网络访问限制在江汉大学域名与学校使用的 17wanxiao 服务域名内。
@@ -129,11 +127,11 @@ entry/src/main/resources/rawfile/scripts/   # 从原 APK 移植的 DOM 操作脚
   1. 打开应用 → 输入教务账号密码（必要时验证码）→ 看课表是否出现。
   2. 切到「常用」→ 逐个打开地图、实验报告、报修、电费。
   3. 杀掉应用重开 → 验证自动登录和离线课表。
-- 如果某一步失败，把 Log 里的 `JwxtWeb` 行发给我即可继续修。
+- 如果某一步失败，把 Log 里的 `JwxtWeb` 行提交到 Issue 即可。
 
 ## 已知限制
 
-- **验证码必须手动输入**（原版也无法绕过）。
+- **验证码必须手动输入**（学校系统本身也无法绕过）。
 - 学校网站改版可能导致解析失败；更新 `rawfile/scripts` 下的脚本即可。
 - 大物实验报告系统只在校园网内开放。
 - 电费缴费页面由学校与 17wanxiao 官方提供；在纯血鸿蒙上唤起支付宝可能失败，

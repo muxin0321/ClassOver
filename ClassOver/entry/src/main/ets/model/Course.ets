@@ -1,5 +1,5 @@
 /**
- * 课程数据模型与周次解析，逻辑对应原 App 的 Course.java。
+ * 课程数据模型与周次解析。
  */
 export interface CourseJson {
   name: string;

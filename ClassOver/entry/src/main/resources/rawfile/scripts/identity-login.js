@@ -19,9 +19,9 @@
   // The school's HTTPS GET redirects to HTTP. Preserve its form action and session;
   // upgrading it again creates a real loop. Still validate the exact host and CAS POST.
   if(!schoolAction())return {state:'unsupported',error:'学校表单的提交地址无法安全使用，请重新加载登录页。'};
-  if(!form.__sanjiaohuSchoolAction){
+  if(!form.__classoverSchoolAction){
     form.addEventListener('submit',function(event){if(!schoolAction())event.preventDefault();},true);
-    form.__sanjiaohuSchoolAction=true;
+    form.__classoverSchoolAction=true;
   }
   if(action==='prepare')return {state:'prepared'};
   function hint(e){return [e.name,e.id,e.placeholder,e.getAttribute('aria-label')].join(' ');}

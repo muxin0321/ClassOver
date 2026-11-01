@@ -19,7 +19,7 @@ export interface ScheduleJson {
   rows?: LegacyScheduleRow[];
 }
 
-/** 学校默认作息时间，对应原 App Schedule.java 中的 12 节课。 */
+/** 学校默认作息时间，共 12 节课。 */
 export const DEFAULT_STARTS: string[] = [
   '08:20', '09:15', '10:20', '11:15',
   '14:00', '14:50', '15:55', '16:45',

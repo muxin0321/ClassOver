@@ -183,7 +183,7 @@ export class JwxtWeb {
   }
 
   /**
-   * 直接检测教务登录表单。不再依赖原版 login-state.js 的 location.origin 判断，
+   * 直接检测教务登录表单。不依赖页面脚本里可能为空的 location.origin 判断，
    * 因为在 ArkWeb 中该判断可能拿到空 origin 或导航中的中间页。
    */
   private directProbeScript(): string {

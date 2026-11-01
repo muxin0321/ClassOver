@@ -50,7 +50,7 @@ function hostAllowed(raw: string): boolean {
     if (!host) {
       return false;
     }
-    // 与原 App 一致：学校主域及其任意子域（jwxt / cas / sso / authserver ...）全部放行。
+    // 学校主域及其任意子域（jwxt / cas / sso / authserver ...）全部放行。
     if (host === 'jhun.edu.cn' || host.endsWith('.jhun.edu.cn')) {
       return true;
     }
