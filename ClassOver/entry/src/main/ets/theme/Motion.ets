@@ -10,11 +10,16 @@ export class Motion {
   // 时长（ms）
   static readonly FAST: number = 160;
   static readonly TAB: number = 180;
+  static readonly TAB_IN: number = 240;
+  static readonly TAB_OUT: number = 120;
   static readonly SHEET_IN: number = 180;
   static readonly PROGRESS: number = 360;
 
   // 位移与透明度
-  static readonly TAB_OFFSET: number = 22;
+  static readonly TAB_OFFSET: number = 32;
+  static readonly TAB_ICON_SCALE: number = 1.06;
+  static readonly TAB_INDICATOR_W: number = 20;
+  static readonly TAB_INDICATOR_H: number = 3;
   static readonly SHEET_OFFSET: number = 6;
   static readonly SHEET_MIN_OPACITY: number = 0.92;
 
@@ -28,6 +33,21 @@ export class Motion {
   /** 通用快速缓出。 */
   static easeOut(): ICurve {
     return curves.cubicBezierCurve(0.16, 1.0, 0.30, 1.0);
+  }
+
+  /** Tab 入场：新页从方向侧覆盖进来，临界阻尼避免边缘回弹露旧页。 */
+  static tabEnter(): ICurve {
+    return LIVELY ? curves.springMotion(0.28, 1.0) : curves.cubicBezierCurve(0.16, 1.0, 0.30, 1.0);
+  }
+
+  /** Tab 退场：快速收走，不依赖方向。 */
+  static tabExit(): ICurve {
+    return curves.cubicBezierCurve(0.40, 0.0, 0.70, 1.0);
+  }
+
+  /** Tab 下划线：临界阻尼，不过冲。 */
+  static tabSettle(): ICurve {
+    return curves.springMotion(0.26, 1.0);
   }
 
   /** 周切换提交：轻快收敛；活泼时更跟手并带轻微回弹。 */

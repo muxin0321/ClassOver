@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.muxin.classover",
     "vendor": "muxin",
-    "versionCode": 1000008,
-    "versionName": "0.3.0",
+    "versionCode": 1000009,
+    "versionName": "0.3.1",
     "icon": "$media:classover",
     "label": "$string:app_name"
   }

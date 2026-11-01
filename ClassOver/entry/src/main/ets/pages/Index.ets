@@ -229,6 +229,7 @@ struct Index {
   @State nowMinute: number = 0;
   @State liveWeek: number = 0;
   @State tabDirection: number = 1;
+  @State tabBarWidth: number = 0;
 
   @State showSheet: boolean = false;
   @State sheetKind: number = 0; // 1 登录, 2 课程详情, 3 周校准, 4 跳转周
@@ -693,6 +694,15 @@ struct Index {
     // 先记方向再切页，保证入场节点拿到的是最新方向。
     this.tabDirection = index > this.currentTab ? 1 : -1;
     this.currentTab = index;
+  }
+
+  /** 新页从方向侧不透明覆盖，旧页快速淡出；退场不依赖方向。 */
+  private tabTransition(): TransitionEffect {
+    return TransitionEffect.asymmetric(
+      TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET })
+        .animation({ duration: Motion.TAB_IN, curve: Motion.tabEnter() }),
+      TransitionEffect.OPACITY.animation({ duration: Motion.TAB_OUT, curve: Motion.tabExit() })
+    );
   }
 
   private async syncNow(auto: boolean, silent: boolean = false): Promise<void> {
@@ -1668,10 +1678,15 @@ struct Index {
       SymbolGlyph(symbol)
         .fontSize(22)
         .fontColor([this.currentTab === index ? this.theme.primary : this.theme.muted])
+        .scale({
+          x: this.currentTab === index ? Motion.TAB_ICON_SCALE : 1,
+          y: this.currentTab === index ? Motion.TAB_ICON_SCALE : 1
+        })
         .animation({ duration: Motion.TAB, curve: Motion.easeOut() })
       Text(label)
         .fontSize(11)
         .fontColor(this.currentTab === index ? this.theme.primary : this.theme.muted)
+        .opacity(this.currentTab === index ? 1 : 0.82)
         .animation({ duration: Motion.TAB, curve: Motion.easeOut() })
         .margin({ top: 2 })
     }
@@ -2135,12 +2150,8 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .transition(TransitionEffect.asymmetric(
-      TransitionEffect.OPACITY
-        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
-        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
-      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
-    ))
+    .backgroundColor(this.theme.bg)
+    .transition(this.tabTransition())
     .id('tab-schedule')
   }
 
@@ -2231,12 +2242,8 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .transition(TransitionEffect.asymmetric(
-      TransitionEffect.OPACITY
-        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
-        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
-      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
-    ))
+    .backgroundColor(this.theme.bg)
+    .transition(this.tabTransition())
     .id('tab-common')
   }
 
@@ -2435,7 +2442,7 @@ struct Index {
           .borderRadius(18)
           .margin({ top: 12 })
 
-          Text('版本 0.3.0 · 作者·凩新')
+          Text('版本 0.3.1 · 作者·凩新')
             .fontSize(10)
             .fontColor(this.theme.faint)
             .margin({ top: 18, bottom: 12 })
@@ -2448,12 +2455,8 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .transition(TransitionEffect.asymmetric(
-      TransitionEffect.OPACITY
-        .combine(TransitionEffect.translate({ x: this.tabDirection * Motion.TAB_OFFSET }))
-        .animation({ duration: Motion.TAB, curve: Motion.easeOut() }),
-      TransitionEffect.OPACITY.animation({ duration: Motion.TAB, curve: Motion.easeOut() })
-    ))
+    .backgroundColor(this.theme.bg)
+    .transition(this.tabTransition())
     .id('tab-profile')
   }
 
@@ -2495,14 +2498,44 @@ struct Index {
   }
 
   @Builder BottomBar() {
-    Row() {
-      this.TabItem(0, $r('sys.symbol.calendar'), '课表')
-      this.TabItem(1, $r('sys.symbol.square_grid_2x2'), '常用')
-      this.TabItem(2, $r('sys.symbol.person'), '我的')
+    Column() {
+      Stack({ alignContent: Alignment.TopStart }) {
+        Row() {
+          this.TabItem(0, $r('sys.symbol.calendar'), '课表')
+          this.TabItem(1, $r('sys.symbol.square_grid_2x2'), '常用')
+          this.TabItem(2, $r('sys.symbol.person'), '我的')
+        }
+        .width('100%')
+        .height(56)
+
+        Row()
+          .width(Motion.TAB_INDICATOR_W)
+          .height(Motion.TAB_INDICATOR_H)
+          .borderRadius(Motion.TAB_INDICATOR_H / 2)
+          .backgroundColor(this.theme.primary)
+          .translate({
+            x: this.tabBarWidth > 0
+              ? (this.currentTab + 0.5) * (this.tabBarWidth / 3) - Motion.TAB_INDICATOR_W / 2
+              : 0,
+            y: 50
+          })
+          .opacity(this.tabBarWidth > 0 ? 1 : 0)
+          .animation({ duration: Motion.TAB_IN, curve: Motion.tabSettle() })
+      }
+      .width('100%')
+      .height(56)
+      .onAreaChange((oldArea: Area, newArea: Area) => {
+        const width = Number.parseFloat(newArea.width.toString());
+        if (Number.isFinite(width) && width > 0 && Math.abs(width - this.tabBarWidth) > 0.5) {
+          this.tabBarWidth = width;
+        }
+      })
+
+      Row()
+        .width('100%')
+        .height(this.bottomInset)
     }
     .width('100%')
-    .height(56 + this.bottomInset)
-    .padding({ bottom: this.bottomInset })
     .backgroundColor(this.theme.card)
     .border({ width: { top: 0.5 }, color: this.theme.line })
   }
